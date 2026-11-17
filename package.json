@@ -14,6 +14,7 @@
     "build": "pnpm --filter @momotombo/desktop build",
     "start": "pnpm --filter @momotombo/desktop start",
     "smoke": "pnpm --filter @momotombo/desktop smoke",
+    "momotombo-edit": "node apps/desktop/dist/cli/momotombo-edit.cjs",
     "perftest": "node apps/desktop/scripts/run-suite.mjs perf",
     "uitest": "node apps/desktop/scripts/run-suite.mjs ui",
     "docshots": "node apps/desktop/scripts/run-suite.mjs docs",
