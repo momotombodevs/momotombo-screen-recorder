@@ -169,3 +169,81 @@ describe('ProjectStore: list', () => {
     expect(JSON.parse(await readFile(join(a.dir, 'project.json'), 'utf8')).id).toBe(a.id);
   });
 });
+
+describe('ProjectStore: edits made outside the app', () => {
+  const settled = () => new Promise((r) => setTimeout(r, 400));
+
+  async function watched() {
+    const { store, created } = await storeWith(1);
+    const { id, dir } = created[0]!;
+    const opened = await store.read(id);
+    const seen: string[] = [];
+    await store.watchExternalEdits(id, (p) => seen.push(p.name));
+    return { store, id, dir, opened, seen };
+  }
+  const writeOutside = (dir: string, text: string) => writeFile(join(dir, 'project.json'), text);
+
+  it('delivers a project.json another program rewrote', async () => {
+    const { store, dir, opened, seen } = await watched();
+    await writeOutside(dir, serializeProject({ ...opened, name: 'Edited outside' }));
+    await vi.waitFor(() => expect(seen).toEqual(['Edited outside']));
+    store.stopWatching();
+  });
+
+  it('stays quiet for the saves the app makes itself, even back to back', async () => {
+    const { store, id, opened, seen } = await watched();
+    await Promise.all([1, 2, 3, 4].map((n) => store.save(id, serializeProject({ ...opened, name: `Save ${n}` }))));
+    await store.rename(id, 'Renamed in the app');
+    await settled();
+    expect(seen).toEqual([]);
+    store.stopWatching();
+  });
+
+  it('refuses a save over an outside edit the editor has not received, and hands that edit over', async () => {
+    const { store, id, dir, opened, seen } = await watched();
+    await writeOutside(dir, serializeProject({ ...opened, name: 'From the CLI' }));
+    await expect(store.save(id, serializeProject({ ...opened, name: 'Stale editor state' }))).rejects.toThrow();
+    expect(seen).toEqual(['From the CLI']);
+    expect((await store.read(id)).name).toBe('From the CLI');
+    await settled();
+    expect(seen).toEqual(['From the CLI']);
+    store.stopWatching();
+  });
+
+  it('hands an outside edit to the editor before a rename builds on it', async () => {
+    const { store, id, dir, opened, seen } = await watched();
+    await writeOutside(dir, serializeProject({ ...opened, zooms: [], name: 'From the CLI' }));
+    await store.rename(id, 'Renamed in the app');
+    expect(seen).toEqual(['From the CLI']);
+    store.stopWatching();
+  });
+
+  it('ignores a file that is not a valid project and delivers the next valid one', async () => {
+    const { store, dir, opened, seen } = await watched();
+    await writeOutside(dir, '{ "schema": 1, "id":');
+    await settled();
+    expect(seen).toEqual([]);
+    await writeOutside(dir, serializeProject({ ...opened, name: 'Repaired' }));
+    await vi.waitFor(() => expect(seen).toEqual(['Repaired']));
+    store.stopWatching();
+  });
+
+  it('stops delivering once the watch is closed or the project is forgotten', async () => {
+    const { store, id, dir, opened, seen } = await watched();
+    store.stopWatching();
+    await writeOutside(dir, serializeProject({ ...opened, name: 'After close' }));
+    await store.watchExternalEdits(id, (p) => seen.push(p.name));
+    store.forget(id);
+    await writeOutside(dir, serializeProject({ ...opened, name: 'After forget' }));
+    await settled();
+    expect(seen).toEqual([]);
+  });
+
+  it('survives the project folder being deleted while watched', async () => {
+    const { store, dir, seen } = await watched();
+    await rm(dir, { recursive: true, force: true });
+    await settled();
+    expect(seen).toEqual([]);
+    store.stopWatching();
+  });
+});

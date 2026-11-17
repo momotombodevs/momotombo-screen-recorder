@@ -171,6 +171,8 @@ export const EN: Record<string, string> = {
   "La pantalla, la cámara y el micrófono se guardan en archivos separados. Después de grabar, puedes editarlo todo en la línea de tiempo.": "Screen, camera and microphone are saved to separate files. After recording, everything can be edited on the timeline.",
   "Se añadió el video, pero no se pudo revisar su sonido porque falta el asistente de audio. El video se añadió sin sonido.": "The video was added, but its sound could not be checked because the sound helper is missing. The video was added without sound.",
   "Se corrigieron elementos superpuestos. Pulsa {key} para deshacer.": "Overlapping items were fixed. Press {key} to undo.",
+  "El proyecto cambió fuera del editor. Pulsa {key} para deshacer.": "The project changed outside the editor. Press {key} to undo.",
+  "El proyecto cambió fuera del editor. Se cargó la versión nueva.": "The project changed outside the editor. The new version was loaded.",
   "Guardado": "Saved",
   "No se pudo guardar": "Could not save",
   "Guardando…": "Saving…",

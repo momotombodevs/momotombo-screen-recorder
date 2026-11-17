@@ -4,7 +4,7 @@ import { contextBridge, ipcRenderer } from 'electron';
 const INVOKE = new Set([
   'app:info', 'app:relaunch',
   'projects:list', 'projects:create', 'projects:open', 'projects:save', 'projects:rename', 'projects:trash',
-  'projects:reveal', 'projects:readText', 'projects:setThumbnail',
+  'projects:reveal', 'projects:readText', 'projects:setThumbnail', 'projects:takeOpenRequest', 'projects:close',
   'permissions:get', 'permissions:request', 'permissions:openSettings',
   'capture:backends', 'capture:sources', 'capture:state', 'capture:start', 'capture:pause', 'capture:resume',
   'capture:mark', 'capture:stop', 'capture:cancel', 'capture:dismissError', 'capture:recoveries', 'capture:dismissRecovery',
@@ -15,7 +15,7 @@ const INVOKE = new Set([
   'media:pickVideo', 'media:importVideo', 'media:discardImport',
 ]);
 
-const EVENTS = new Set(['settings:changed', 'capture:state', 'capture:finished', 'capture:releaseDevices', 'capture:recovered', 'cw:prepare', 'cw:go', 'cw:pause', 'cw:resume', 'cw:stop']);
+const EVENTS = new Set(['settings:changed', 'projects:changed', 'projects:openRequest', 'capture:state', 'capture:finished', 'capture:releaseDevices', 'capture:recovered', 'cw:prepare', 'cw:go', 'cw:pause', 'cw:resume', 'cw:stop']);
 
 contextBridge.exposeInMainWorld('momotombo', {
   invoke(channel: string, payload?: unknown): Promise<unknown> {

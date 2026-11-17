@@ -34,6 +34,10 @@ export const api = {
   revealProject: (id: string) => call<void>('projects:reveal', { id }),
   readProjectText: (id: string, path: string) => call<string>('projects:readText', { id, path }),
   setThumbnail: (id: string, dataUrl: string) => call<void>('projects:setThumbnail', { id, dataUrl }),
+  onProjectChanged: (fn: (change: { id: string; json: unknown }) => void) => bridge().on('projects:changed', (d) => fn(d as { id: string; json: unknown })),
+  closeProject: () => call<void>('projects:close'),
+  takeOpenRequest: () => call<string | null>('projects:takeOpenRequest'),
+  onOpenRequest: (fn: () => void) => bridge().on('projects:openRequest', () => fn()),
 
   permissions: () => call<PermissionInfo>('permissions:get'),
   requestPermission: (kind: 'camera' | 'microphone' | 'screen') => call<boolean>('permissions:request', { kind }),

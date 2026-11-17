@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  DEFAULT_CAMERA_MOVE, activeVariant, laneRange, layoutSegments, removeCameraLayout, removeMagnifier, removePrivacy, removeSegment,
+  DEFAULT_CAMERA_MOVE, activeVariant, laneRange, layoutSegments, parseProject, removeCameraLayout, removeMagnifier, removePrivacy, removeSegment,
   removeZoom, renameProject, resolveOverlaps, sequenceDuration, setActiveVariant, splitAt, timelineToSource,
 } from '@momotombo/project-model';
 import type { OpenedProject } from '@momotombo/protocol';
@@ -92,6 +92,12 @@ export function Editor({ opened, onBack, notice: initialNotice, onNoticeShown }:
     store.notify(initialNotice, 12_000);
     onNoticeShown?.();
   }, [store]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => api.onProjectChanged(({ id, json }) => {
+    if (id !== store.project.id) return;
+    store.apply(() => parseProject(json));
+    store.notify(t("El proyecto cambió fuera del editor. Pulsa {key} para deshacer.", { key: keyLabel('mod+Z') }));
+  }), [store]);
 
   const leave = async () => { if (await store.requestLeave()) onBack(); };
   // Playback would overwrite the new position on its next frame.

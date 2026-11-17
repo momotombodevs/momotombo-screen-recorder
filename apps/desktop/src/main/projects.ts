@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto';
+import { watch, type FSWatcher } from 'node:fs';
 import { copyFile, mkdir, readFile, readdir, stat } from 'node:fs/promises';
 import { basename, dirname, extname, join } from 'node:path';
 import {
@@ -7,7 +8,17 @@ import {
 import { IMPORT_VIDEO_TYPES, type ImportedVideo, type ProjectSummary } from '@momotombo/protocol';
 import { PROJECT_FILE } from '../shared/brand';
 import { dirSize, exists, removeQuiet, safeJoin, writeFileAtomic } from './fsutil';
+import { readProjectText, validatedProjectText, writeProjectTextKeepingBackup } from './project-file';
 import { tm } from './settings';
+
+const EXTERNAL_EDIT_SETTLE_MS = 80;
+const KNOWN_TEXTS_KEPT = 16;
+
+interface ExternalEditWatch {
+  onEdit: (project: Project) => void;
+  knownTexts: string[];
+  stop: () => void;
+}
 
 /**
  * Projects are folders under one root: project.json + media/ + cache/.
@@ -23,6 +34,7 @@ export class ProjectStore {
    * entry from `project.recordings`, so a save without one is a stale copy and gets it back.
    */
   private unconfirmed = new Map<string, Map<string, Recording>>();
+  private watches = new Map<string, ExternalEditWatch>();
 
   constructor(readonly root: string) {}
 
@@ -156,15 +168,84 @@ export class ProjectStore {
   }
 
   async read(id: string): Promise<Project> {
-    return parseProject(JSON.parse(await readFile(join(this.dirOf(id), PROJECT_FILE), 'utf8')));
+    return parseProject(JSON.parse(await readProjectText(this.dirOf(id))));
   }
 
-  /** Saves serialized JSON after validating it. Writes for one project are serialized. */
+  /**
+   * Saves serialized JSON after validating it. Writes for one project are serialized. While an
+   * editor watches the project, a save over an edit made outside the app that the editor has not
+   * received yet is refused, and that edit is sent to the editor instead.
+   */
   async save(id: string, json: string): Promise<void> {
     const project = parseProject(JSON.parse(json));
     if (project.id !== id) throw new Error('Project id does not match');
     const dir = this.dirOf(id);
-    await this.serialized(id, () => writeProject(dir, this.keepAppended(id, project)));
+    await this.serialized(id, async () => {
+      if (await this.deliverExternalEdit(id)) throw new Error(tm("El proyecto cambió fuera del editor. Se cargó la versión nueva."));
+      await this.write(id, dir, this.keepAppended(id, project));
+    });
+  }
+
+  private async write(id: string, dir: string, project: Project): Promise<void> {
+    const text = validatedProjectText(project);
+    this.remember(id, text);
+    await writeProjectTextKeepingBackup(dir, text);
+  }
+
+  private remember(id: string, text: string): void {
+    const known = this.watches.get(id)?.knownTexts;
+    if (!known) return;
+    known.push(text);
+    if (known.length > KNOWN_TEXTS_KEPT) known.shift();
+  }
+
+  /** Sends the editor watching `id` an edit made outside the app; true when there was one. */
+  private async deliverExternalEdit(id: string): Promise<boolean> {
+    const w = this.watches.get(id);
+    if (!w) return false;
+    const text = await readProjectText(this.dirOf(id)).catch(() => null);
+    if (text === null || w.knownTexts.includes(text)) return false;
+    let project: Project;
+    try { project = parseProject(JSON.parse(text)); } catch { return false; }
+    this.remember(id, text);
+    w.onEdit(project);
+    return true;
+  }
+
+  /**
+   * Calls `onEdit` with project.json each time a program other than this app rewrites it with a
+   * valid project. One project is watched at a time; watching another stops the previous watch.
+   */
+  async watchExternalEdits(id: string, onEdit: (project: Project) => void): Promise<void> {
+    this.stopWatching();
+    const dir = this.dirOf(id);
+    let settle: ReturnType<typeof setTimeout> | undefined;
+    let watcher: FSWatcher;
+    try {
+      watcher = watch(dir, (_event, name) => {
+        if (name !== PROJECT_FILE) return;
+        clearTimeout(settle);
+        settle = setTimeout(() => void this.serialized(id, () => this.deliverExternalEdit(id)), EXTERNAL_EDIT_SETTLE_MS);
+      });
+    } catch (e) {
+      process.stderr.write(`Cannot watch ${dir} for outside edits: ${String(e)}\n`);
+      return;
+    }
+    const w: ExternalEditWatch = {
+      onEdit,
+      knownTexts: [await readProjectText(dir).catch(() => '')],
+      stop: () => {
+        clearTimeout(settle);
+        watcher.close();
+        if (this.watches.get(id) === w) this.watches.delete(id);
+      },
+    };
+    watcher.on('error', w.stop);
+    this.watches.set(id, w);
+  }
+
+  stopWatching(): void {
+    for (const w of [...this.watches.values()]) w.stop();
   }
 
   private keepAppended(id: string, project: Project): Project {
@@ -182,8 +263,9 @@ export class ProjectStore {
   async appendRecording(id: string, recording: Recording): Promise<Project> {
     const dir = this.dirOf(id);
     return this.serialized(id, async () => {
+      await this.deliverExternalEdit(id);
       const project = addRecording(await this.read(id), recording);
-      await writeProject(dir, parseProject(JSON.parse(serializeProject(project))));
+      await this.write(id, dir, project);
       const pending = this.unconfirmed.get(id) ?? new Map<string, Recording>();
       pending.set(recording.id, recording);
       this.unconfirmed.set(id, pending);
@@ -194,8 +276,9 @@ export class ProjectStore {
   async rename(id: string, name: string): Promise<void> {
     const dir = this.dirOf(id);
     await this.serialized(id, async () => {
+      await this.deliverExternalEdit(id);
       const p = await this.read(id);
-      await writeProject(dir, parseProject(JSON.parse(serializeProject({ ...p, name: name.trim() || p.name }))));
+      await this.write(id, dir, { ...p, name: name.trim() || p.name });
     });
   }
 
@@ -204,6 +287,7 @@ export class ProjectStore {
   }
 
   forget(id: string): void {
+    this.watches.get(id)?.stop();
     this.dirs.delete(id);
     this.unconfirmed.delete(id);
     this.noteChange(id, null);
@@ -214,15 +298,6 @@ export class ProjectStore {
     await mkdir(dir, { recursive: true });
     return dir;
   }
-}
-
-async function writeProject(dir: string, project: Project): Promise<void> {
-  const file = join(dir, PROJECT_FILE);
-  try {
-    const current = await readFile(file);
-    await writeFileAtomic(`${file}.bak`, current);
-  } catch { /* first save */ }
-  await writeFileAtomic(file, serializeProject(project));
 }
 
 async function readThumbnail(dir: string): Promise<string | null> {

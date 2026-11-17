@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { CaptureState, OpenedProject, RecoveryNotice } from '@momotombo/protocol';
 import { api } from './api';
 import { t, useLang } from './i18n';
@@ -23,6 +23,8 @@ function formatElapsed(ms: number): string {
 export function App() {
   useLang(); // re-render the whole tree when the language changes
   const [route, setRoute] = useState<Route>({ name: 'home' });
+  const openProjectId = useRef<string | null>(null);
+  openProjectId.current = route.name === 'editor' ? route.opened.id : null;
   const [capture, setCapture] = useState<CaptureState | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [error, setError] = useState<string | null>(null);
@@ -45,10 +47,16 @@ export function App() {
       }
       setRefreshKey((k) => k + 1);
     });
+    const openRequested = async () => {
+      const id = await api.takeOpenRequest();
+      if (id && id !== openProjectId.current) void open(id);
+    };
+    void openRequested();
+    const off4 = api.onOpenRequest(() => void openRequested());
     // Test hooks (only in --smoke mode).
     const onSmoke = (e: Event) => { if (document.documentElement.dataset.smoke === '1') void open((e as CustomEvent<string>).detail); };
     window.addEventListener('momotombo:smoke-open', onSmoke);
-    return () => { off1(); off2(); off3(); window.removeEventListener('momotombo:smoke-open', onSmoke); };
+    return () => { off1(); off2(); off3(); off4(); window.removeEventListener('momotombo:smoke-open', onSmoke); };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const open = async (id: string) => {
@@ -68,7 +76,7 @@ export function App() {
     const recovered = recoveries.find((r) => r.projectId === route.opened.id);
     return <Editor key={route.opened.id} opened={route.opened} notice={recovered?.message}
       onNoticeShown={() => { if (recovered) void api.dismissRecovery(recovered.recordingId); }}
-      onBack={() => { setRoute({ name: 'home' }); setRefreshKey((k) => k + 1); }} />;
+      onBack={() => { void api.closeProject(); setRoute({ name: 'home' }); setRefreshKey((k) => k + 1); }} />;
   }
 
   return (

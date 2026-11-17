@@ -11,6 +11,7 @@ import type { ZodType } from 'zod';
 import { CaptureWorker, IMPORT_VIDEO_TYPES, Schemas, type AppInfo, type Channel, type CpuSample, type EncoderInfo, type ExportTarget, type OpenedProject, type PickedFile, type ThirdPartyInfo } from '@momotombo/protocol';
 import { newId, type Recording } from '@momotombo/project-model';
 import { APP_NAME, PROJECTS_FOLDER } from '../shared/brand';
+import { projectIdFromArgv } from '../shared/open-project';
 import { migrateLegacyData } from './legacy-name';
 import { CaptureManager } from './capture/manager';
 import { runCodecProbe } from './codec-probe';
@@ -73,6 +74,7 @@ let icon: Electron.NativeImage | undefined; // created once the app is ready
 let minimizedForCapture = false;
 let minimizedAt = 0;
 let pendingFinished: unknown = null;
+let pendingOpenProject = projectIdFromArgv(process.argv);
 
 function openMainWindow(): BrowserWindow {
   const win = createMainWindow(!SMOKE, SMOKE, icon);
@@ -127,6 +129,11 @@ const mfExports = new MfExports(() => {
 });
 const endExport = (exportId: string, cancel: boolean) => (exportId.startsWith('mf_') ? mfExports.end(exportId, cancel) : exportsWriter.end(exportId, cancel));
 
+function requestOpenProject(id: string): void {
+  pendingOpenProject = id;
+  broadcast('projects:openRequest', null);
+}
+
 function broadcast(channel: string, data: unknown): void {
   for (const w of BrowserWindow.getAllWindows()) if (!w.isDestroyed()) w.webContents.send(channel, data);
 }
@@ -158,16 +165,23 @@ function registerIpc(): void {
 
   // Projects
   handleNoArgs('projects:list', () => store.list());
+  handleNoArgs('projects:takeOpenRequest', () => {
+    const id = pendingOpenProject;
+    pendingOpenProject = null;
+    return id;
+  });
   handle('projects:create', async ({ name }) => {
     const r = await store.create(name);
     return { id: r.id };
   });
   handle('projects:open', async ({ id }): Promise<OpenedProject> => {
     const project = await store.read(id);
+    await store.watchExternalEdits(id, (json) => broadcast('projects:changed', { id, json }));
     return { id, json: project, mediaBase: mediaBase(id), dir: store.dirOf(id) };
   });
   handle('projects:save', ({ id, json }) => store.save(id, json));
   handle('projects:rename', ({ id, name }) => store.rename(id, name));
+  handleNoArgs('projects:close', () => store.stopWatching());
   handle('projects:trash', async ({ id }) => {
     await shell.trashItem(store.dirOf(id));
     store.forget(id);
@@ -666,7 +680,11 @@ async function boot(): Promise<void> {
   }
 }
 
-app.on('second-instance', () => restoreMain());
+app.on('second-instance', (_event, argv) => {
+  const id = projectIdFromArgv(argv);
+  if (id) requestOpenProject(id);
+  restoreMain();
+});
 
 app.whenReady().then(() => (CODEC_PROBE ? runCodecProbe(CODEC_PROBE, argAfter('--codec-fixtures')).then((code) => app.exit(code)) : boot())).catch((e) => {
   process.stderr.write(`Startup error: ${String(e)}\n`);
