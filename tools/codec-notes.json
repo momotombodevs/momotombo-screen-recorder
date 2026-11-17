@@ -1,0 +1,243 @@
+{
+  "$comment": "Codec components: the open-source (copyright) license and the patent status are kept apart. No row shows the patent status as resolved. 'profiles': the distributions a row applies to (mp4 = A, released; webm = B; webm-vp8 = experimental VP8); a package's notices list only its own profile's rows. When 'chromiumTitle' is set, a test checks that Electron's LICENSES.chromium.html has an entry with that title. Text fields are { es, en }: Spanish for the app's Spanish UI and the notices, English for the English UI.",
+  "rows": [
+    {
+      "id": "ffmpeg",
+      "name": "FFmpeg (libffmpeg, la compilación de Electron sin códecs propietarios)",
+      "nameEn": "FFmpeg (libffmpeg, Electron's build without proprietary codecs)",
+      "profiles": [
+        "mp4",
+        "webm",
+        "webm-vp8"
+      ],
+      "chromiumTitle": "ffmpeg",
+      "where": {
+        "es": "Biblioteca aparte, enlazada dinámicamente (macOS: libffmpeg.dylib, Windows: ffmpeg.dll). Es la compilación oficial de Electron sin códecs propietarios (configuración de compilación de Electron: ffmpeg_branding \"Chromium\", proprietary_codecs false); decodificadores medidos: FLAC, MP3, Vorbis, Opus, PCM. No tiene decodificadores H.264 ni AAC, ni codificadores.",
+        "en": "Separate, dynamically linked library (macOS: libffmpeg.dylib, Windows: ffmpeg.dll). Electron's official build without proprietary codecs (Electron's build arguments: ffmpeg_branding \"Chromium\", proprietary_codecs false); measured decoders: FLAC, MP3, Vorbis, Opus, PCM. No H.264 or AAC decoder, no encoders."
+      },
+      "license": {
+        "es": "Este software usa bibliotecas del proyecto FFmpeg bajo la LGPLv2.1 (LGPL-2.1 o posterior; texto completo en LICENSES.chromium.html, entrada \"ffmpeg\"). Código fuente correspondiente: chromium/third_party/ffmpeg 2b68d2babae7 (la revisión que fija Chromium 152.0.7977.167), el parche de Electron y su configuración de compilación; se adjunta como archivo aparte a cada versión de GitHub (FFMPEG-LGPL.md).",
+        "en": "This software uses libraries from the FFmpeg project under the LGPLv2.1 (LGPL-2.1-or-later; full text in LICENSES.chromium.html, entry \"ffmpeg\"). Corresponding source: chromium/third_party/ffmpeg 2b68d2babae7 (the revision Chromium 152.0.7977.167 pins), Electron's patch and build arguments; attached to every GitHub release as a separate file (FFMPEG-LGPL.md)."
+      },
+      "patent": {
+        "es": "Los decodificadores sujetos a consorcios de patentes (H.264, AAC) no están en el paquete. Para los demás formatos no se encontró ningún consorcio activo conocido; no se verificó legalmente.",
+        "en": "Patent-pool decoders (H.264, AAC) are not in the package. No active pool was found for the remaining formats; not legally verified."
+      },
+      "status": "low-risk-unverified"
+    },
+    {
+      "id": "openh264",
+      "name": "OpenH264 (dentro de Electron)",
+      "nameEn": "OpenH264 (inside Electron)",
+      "profiles": [
+        "mp4",
+        "webm",
+        "webm-vp8"
+      ],
+      "chromiumTitle": "OpenH264",
+      "where": {
+        "es": "Compilado de forma estática en el binario principal de Electron (medido). Momotombo no lo pide en ninguna distribución: H.264 solo se pide al codificador de hardware (del sistema operativo); en la prueba smoke completa OpenH264 no se inició ni una vez. No se puede quitar de los binarios oficiales de Electron.",
+        "en": "Statically compiled into Electron's main binary (measured). Momotombo never asks for it in either distribution: H.264 is only requested from the hardware (operating-system) encoder; it was not started once during the full smoke test. It cannot be removed from official Electron binaries."
+      },
+      "license": {
+        "es": "BSD-2-Clause",
+        "en": "BSD-2-Clause"
+      },
+      "patent": {
+        "es": "La cobertura de patentes H.264 de Cisco solo vale para su binario descargado de Cisco durante la instalación; no cubre esta copia compilada desde el código fuente. No está claro si distribuir un codificador que no se usa requiere licencia.",
+        "en": "Cisco's H.264 patent coverage applies only to its binary downloaded at install time, not to this copy built from source. Whether distributing an unused encoder needs a license is unclear."
+      },
+      "status": "legal-review"
+    },
+    {
+      "id": "h264-encode",
+      "name": "Codificación H.264 (exportación MP4)",
+      "nameEn": "H.264 encoding (MP4 export)",
+      "profiles": [
+        "mp4",
+        "webm"
+      ],
+      "chromiumTitle": null,
+      "where": {
+        "es": "El codificador del sistema operativo: primero el codificador de la tarjeta gráfica (hardware) mediante WebCodecs: VideoToolbox en macOS (medido), Media Foundation en Windows (no probado en Windows). En Windows sin codificador de hardware se usa el codificador de software del propio Windows (\"H264 Encoder MFT\", mfh264enc.dll) mediante el Sink Writer del asistente de Windows (visto en el inventario del runner de Windows de GitHub; aún no medido desde la app). Nunca se pide el codificador H.264 de software de Electron (OpenH264). Si no hay ninguno, el video se guarda como WebM y la app lo dice claramente; no se escribe otro códec en MP4. En la distribución A, el asistente de grabación de macOS también escribe la pantalla y la cámara en H.264 con VideoToolbox.",
+        "en": "The operating system's encoder: first the graphics card's (hardware) encoder through WebCodecs: macOS VideoToolbox (measured), Windows Media Foundation (not tested on Windows). On Windows without a hardware encoder, Windows' own software encoder (\"H264 Encoder MFT\", mfh264enc.dll) is used through the Windows helper's Sink Writer (seen in the inventory on GitHub's Windows runner; not yet measured from the app). Electron's software H.264 encoder (OpenH264) is never asked for. With neither, the video is saved as WebM and the app says so; no other codec is written into MP4. In the A distribution the macOS recorder also writes screen and camera as H.264 through VideoToolbox."
+      },
+      "license": {
+        "es": "El codificador no es de Momotombo; pertenece al sistema operativo",
+        "en": "The encoder is not Momotombo's; it belongs to the operating system"
+      },
+      "patent": {
+        "es": "Apple (SLA de macOS Tahoe 26, §14 D) y Microsoft (términos de licencia de Windows 11) licencian la función AVC solo para uso personal y no comercial del consumidor; el uso comercial requiere una licencia adicional. El consorcio AVC de Via LA está activo. No está claro quién sería el licenciatario.",
+        "en": "Apple (macOS Tahoe 26 SLA §14 D) and Microsoft (Windows 11 license terms) license AVC functionality only for a consumer's personal and non-commercial use; commercial use needs additional licensing. The Via LA AVC pool is active. Who the licensee would be is unclear."
+      },
+      "status": "legal-review"
+    },
+    {
+      "id": "h264-decode",
+      "name": "Decodificación H.264 (grabaciones y videos importados)",
+      "nameEn": "H.264 decoding (recordings and imported videos)",
+      "profiles": [
+        "mp4",
+        "webm",
+        "webm-vp8"
+      ],
+      "chromiumTitle": null,
+      "where": {
+        "es": "El paquete no tiene decodificador H.264; H.264 solo lo decodifica el decodificador del sistema operativo (VideoToolbox en macOS, medido; en Windows, Media Foundation o el decodificador de hardware, no probado). En la distribución B, solo para los videos H.264 que importas.",
+        "en": "No H.264 decoder in the package; H.264 is decoded only by the operating system's decoder (macOS VideoToolbox, measured; on Windows Media Foundation / the hardware decoder, not tested). In the B distribution only for H.264 videos the user imports."
+      },
+      "license": {
+        "es": "El decodificador no es de Momotombo; pertenece al sistema operativo",
+        "en": "The decoder is not Momotombo's; it belongs to the operating system"
+      },
+      "patent": {
+        "es": "El aviso AVC de las licencias del sistema operativo también limita la decodificación al uso personal y no comercial. No se verificó legalmente.",
+        "en": "The AVC notice in the operating-system licenses limits decoding to personal and non-commercial use as well. Not legally verified."
+      },
+      "status": "legal-review"
+    },
+    {
+      "id": "aac-encode",
+      "name": "Codificación AAC (exportación MP4)",
+      "nameEn": "AAC encoding (MP4 export)",
+      "profiles": [
+        "mp4",
+        "webm"
+      ],
+      "chromiumTitle": null,
+      "where": {
+        "es": "El codificador del sistema operativo (el audio de las exportaciones MP4): libffmpeg no tiene codificadores (medido); AudioToolbox en macOS, Media Foundation en Windows (WebCodecs o, en la ruta H.264 por software, \"Microsoft AAC Audio Encoder MFT\", mfaacenc.dll, dentro del Sink Writer del asistente de Windows; no probado desde la app en Windows). Si no hay codificador, el video se guarda como WebM; nunca se escribe Opus en MP4. Las grabaciones se escriben con Opus, no con AAC.",
+        "en": "The operating system's encoder (the sound of MP4 exports): libffmpeg has no encoders (measured); AudioToolbox on macOS, Media Foundation on Windows (WebCodecs or, on the software H.264 path, \"Microsoft AAC Audio Encoder MFT\", mfaacenc.dll, inside the Windows helper's Sink Writer; not tested from the app on Windows). Without one, the video is saved as WebM; Opus is never written into MP4. Recordings are written with Opus, not AAC."
+      },
+      "license": {
+        "es": "El codificador no es de Momotombo",
+        "en": "The encoder is not Momotombo's"
+      },
+      "patent": {
+        "es": "Via LA AAC: los productos codificadores/decodificadores para usuarios finales requieren licencia (cuota inicial de 15.000 USD, 1.000 USD para pequeñas empresas; desde 0,98 USD por unidad). No está claro si una app que llama al codificador del sistema operativo cuenta como tal producto. Distribuir contenido AAC es gratis.",
+        "en": "Via LA AAC: end-user encoder/decoder products need a license (initial fee USD 15,000, USD 1,000 for small entities; from USD 0.98 per unit). Whether an app that calls the operating system's encoder is such a product is unclear. Distributing AAC content is free."
+      },
+      "status": "legal-review"
+    },
+    {
+      "id": "aac-decode",
+      "name": "Decodificación AAC (audio de videos importados)",
+      "nameEn": "AAC decoding (sound of imported videos)",
+      "profiles": [
+        "mp4",
+        "webm",
+        "webm-vp8"
+      ],
+      "chromiumTitle": null,
+      "where": {
+        "es": "El paquete no tiene decodificador AAC. Cuando agregas un video con audio AAC, el audio se decodifica con el decodificador propio del sistema operativo: AVFoundation en macOS (bin/momotombo-audio, lo reescribe como Opus), Media Foundation en Windows (resources/bin/momotombo-win.exe, escribe WAV PCM de 16 bits; no probado en Windows). Si no se puede decodificar, el video se agrega sin audio y se te avisa.",
+        "en": "No AAC decoder in the package. When a video with AAC sound is added, the operating system's own decoder decodes the sound: AVFoundation on macOS (bin/momotombo-audio, rewrites it as Opus), Media Foundation on Windows (resources/bin/momotombo-win.exe, writes 16-bit PCM WAV; not tested on Windows). If it cannot be decoded, the video is added without sound and the user is warned."
+      },
+      "license": {
+        "es": "El decodificador no es de Momotombo; pertenece al sistema operativo",
+        "en": "The decoder is not Momotombo's; it belongs to the operating system"
+      },
+      "patent": {
+        "es": "La incertidumbre de la fila de codificación AAC también vale para la decodificación.",
+        "en": "The uncertainty in the AAC encoding row applies to decoding too."
+      },
+      "status": "legal-review"
+    },
+    {
+      "id": "libvpx",
+      "name": "VP9 / VP8 (libvpx)",
+      "nameEn": "VP9 / VP8 (libvpx)",
+      "profiles": [
+        "mp4",
+        "webm",
+        "webm-vp8"
+      ],
+      "chromiumTitle": "libvpx",
+      "where": {
+        "es": "Electron (exportación WebM, ruta de grabación de Chromium, decodificación)",
+        "en": "Electron (WebM export, Chromium recording path, decoding)"
+      },
+      "license": {
+        "es": "BSD-3-Clause y la licencia de patentes aparte de Google",
+        "en": "BSD-3-Clause plus Google's separate patent grant"
+      },
+      "patent": {
+        "es": "Google otorga una licencia de patentes perpetua y libre de regalías para las implementaciones que distribuye el proyecto WebM (libvpx), limitada a las patentes propias de Google. El consorcio VP9 de Sisvel dice cubrir todo producto de consumo que use VP9 y no menciona los productos solo de software. No se verificó legalmente.",
+        "en": "Google grants a royalty-free, perpetual patent license for the implementations the WebM project distributes (libvpx), limited to Google's own patents. Sisvel's VP9 pool says it covers any consumer product using VP9 and does not mention software-only products. Not legally verified."
+      },
+      "status": "low-risk-unverified"
+    },
+    {
+      "id": "opus",
+      "name": "Opus (libopus; en macOS, el codificador Opus del sistema)",
+      "nameEn": "Opus (libopus; on macOS the system's Opus encoder)",
+      "profiles": [
+        "mp4",
+        "webm",
+        "webm-vp8"
+      ],
+      "chromiumTitle": "opus",
+      "where": {
+        "es": "Electron (codificación y decodificación de audio WebM/MP4). El asistente de grabación de macOS escribe el micrófono y el audio del sistema en MP4 con el codificador Opus de macOS.",
+        "en": "Electron (WebM/MP4 audio encoding and decoding). The macOS recorder writes microphone and system audio to MP4 with macOS's Opus encoder."
+      },
+      "license": {
+        "es": "BSD-3-Clause y licencias de patentes de Xiph, Broadcom y Microsoft",
+        "en": "BSD-3-Clause plus Xiph/Broadcom/Microsoft patent licenses"
+      },
+      "patent": {
+        "es": "Xiph.Org, Broadcom y Microsoft otorgan licencias de patentes automáticas y libres de regalías (que terminan para quien demande). Algunas empresas presentaron ante la IETF declaraciones que podrían implicar regalías; el sitio de Opus cita una opinión legal externa según la cual Opus puede implementarse sin licenciarlas. El comunicado de prensa del consorcio Vectis dice que no apunta al software independiente. No se verificó legalmente.",
+        "en": "Xiph.Org, Broadcom and Microsoft grant royalty-free, automatic patent licenses (ending for those who sue). Some companies filed possibly royalty-bearing IETF disclosures; the Opus site cites outside counsel that Opus can be implemented without licensing them. Vectis' press release says its pool does not target stand-alone software. Not legally verified."
+      },
+      "status": "low-risk-unverified"
+    },
+    {
+      "id": "av1",
+      "name": "AV1 (codificador libaom, decodificador dav1d; dentro de Electron)",
+      "nameEn": "AV1 (libaom encoder, dav1d decoder; inside Electron)",
+      "profiles": [
+        "mp4",
+        "webm",
+        "webm-vp8"
+      ],
+      "chromiumTitle": "Alliance for Open Media Video Codec",
+      "where": {
+        "es": "En el binario principal de Electron (medido). Momotombo todavía no exporta en AV1; los videos AV1 importados se decodifican.",
+        "en": "In Electron's main binary (measured). Momotombo does not export AV1 yet; imported AV1 videos are decoded."
+      },
+      "license": {
+        "es": "libaom: BSD-2-Clause + AOMedia Patent License 1.0; dav1d: BSD-2-Clause (entrada \"dav1d is an AV1 decoder :)\")",
+        "en": "libaom: BSD-2-Clause + AOMedia Patent License 1.0; dav1d: BSD-2-Clause (entry \"dav1d is an AV1 decoder :)\")"
+      },
+      "patent": {
+        "es": "Existe la licencia de patentes libre de regalías de AOMedia; Sisvel también tiene un consorcio AV1 de pago. Riesgo bajo, no se verificó legalmente.",
+        "en": "The AOMedia royalty-free patent license exists; Sisvel also runs a paid AV1 pool. Low risk, not legally verified."
+      },
+      "status": "low-risk-unverified"
+    },
+    {
+      "id": "containers",
+      "name": "Escritores de contenedores MP4 y WebM",
+      "nameEn": "MP4 and WebM container writers",
+      "profiles": [
+        "mp4",
+        "webm",
+        "webm-vp8"
+      ],
+      "chromiumTitle": null,
+      "where": {
+        "es": "Código propio de Momotombo (packages/media-web). MP4 solo lleva H.264 + AAC; WebM lleva VP9 (VP8 en la compilación experimental) + Opus.",
+        "en": "Momotombo's own code (packages/media-web). MP4 carries only H.264 + AAC, WebM carries VP9 (VP8 in the experimental build) + Opus."
+      },
+      "license": {
+        "es": "Código propio de Momotombo (PolyForm Shield License 1.0.0)",
+        "en": "Momotombo's own code (PolyForm Shield License 1.0.0)"
+      },
+      "patent": {
+        "es": "Matroska es un formato abierto (RFC 9559). No se encontró ningún consorcio de patentes activo conocido para ISO BMFF; no se verificó.",
+        "en": "Matroska is an open format (RFC 9559). No active patent pool for ISO BMFF was found; not verified."
+      },
+      "status": "low-risk-unverified"
+    }
+  ]
+}

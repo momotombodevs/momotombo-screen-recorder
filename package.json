@@ -1,0 +1,35 @@
+{
+  "name": "momotombo-workspace",
+  "private": true,
+  "version": "0.1.0",
+  "author": "Momotombo Devs",
+  "license": "PolyForm-Shield-1.0.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "packageManager": "pnpm@12.21.0",
+  "scripts": {
+    "dev": "pnpm --filter @momotombo/desktop dev",
+    "build": "pnpm --filter @momotombo/desktop build",
+    "start": "pnpm --filter @momotombo/desktop start",
+    "smoke": "pnpm --filter @momotombo/desktop smoke",
+    "perftest": "node apps/desktop/scripts/run-suite.mjs perf",
+    "uitest": "node apps/desktop/scripts/run-suite.mjs ui",
+    "docshots": "node apps/desktop/scripts/run-suite.mjs docs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node tools/check-boundaries.mjs && vitest run",
+    "licenses": "node tools/license-inventory.mjs",
+    "package": "node apps/desktop/scripts/package.mjs",
+    "codec-audit": "node tools/codec-audit.mjs",
+    "native:mac": "bash native/recorder-macos/build.sh",
+    "native:input": "bash native/input-macos/build.sh",
+    "native:audio": "bash native/audio-macos/build.sh",
+    "native:win": "bash native/helper-windows/build.sh"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.5",
+    "typescript": "7.0.2",
+    "vitest": "5.0.5"
+  }
+}

@@ -1,0 +1,35 @@
+{
+  "$comment": "Components in Electron's packages that Electron's LICENSES.chromium.html does not list (found on 2026-10-17 by matching every binary in the package to a notice). The license texts were taken unchanged from the official repositories; the d3dcompiler row's text is the protections of the Windows SDK license that must be passed on to end users (written for Momotombo, awaiting legal review: tools/windows-terms.json). 'files': path patterns from the package root; tools/codec-audit.mjs checks that these files have a notice. The version, license and source fields are shown as is on the app's Licenses screen, so they are in Spanish.",
+  "rows": [
+    {
+      "id": "mantle",
+      "name": "Mantle",
+      "platforms": ["darwin"],
+      "files": ["Momotombo.app/Contents/Frameworks/Mantle.framework/"],
+      "version": "Compilación propia de Electron (com.electron.mantle), dependencia de Squirrel.Mac",
+      "license": "MIT; partes de Proton con BSD",
+      "licenseFile": "Mantle-LICENSE.md",
+      "source": "https://github.com/Mantle/Mantle/blob/ed1a76b493/LICENSE.md (el archivo de licencia no cambia desde 2015-03-21)"
+    },
+    {
+      "id": "reactiveobjc",
+      "name": "ReactiveObjC",
+      "platforms": ["darwin"],
+      "files": ["Momotombo.app/Contents/Frameworks/ReactiveObjC.framework/"],
+      "version": "3.1.0 (compilación de Electron, com.electron.reactive), dependencia de Squirrel.Mac",
+      "license": "MIT",
+      "licenseFile": "ReactiveObjC-LICENSE.md",
+      "source": "https://github.com/ReactiveCocoa/ReactiveObjC/blob/3.1.0/LICENSE.md"
+    },
+    {
+      "id": "d3dcompiler",
+      "name": "Microsoft Direct3D HLSL Compiler (d3dcompiler_47.dll)",
+      "platforms": ["win32"],
+      "files": ["d3dcompiler_47.dll"],
+      "version": "10.0.26100.7705 (Windows SDK 10.0.26100, \"Direct3D HLSL Compiler for Redistribution\")",
+      "license": "Software de Microsoft; viene con Electron como código distribuible (Distributable Code) según los términos de licencia del Windows SDK. Momotombo no es dueño de este archivo y la licencia de Momotombo no se aplica a él. La licencia del Windows SDK exige que quien lo distribuye haga aceptar a los usuarios finales unos términos que protejan a Microsoft; esos términos están abajo y se aceptan en el primer inicio en Windows. © Microsoft Corporation.",
+      "licenseFile": "MICROSOFT-D3DCOMPILER-TERMS.txt",
+      "source": "Licencia del Windows SDK: https://aka.ms/WinSDKLicenseURL ; distribución junto a la app: https://learn.microsoft.com/en-us/windows/win32/directx-sdk--august-2009- (no es un componente del sistema)"
+    }
+  ]
+}

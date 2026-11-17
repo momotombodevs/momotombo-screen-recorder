@@ -1,0 +1,113 @@
+/* Momotombo design tokens — neutral near-black surfaces with a glass layer, a volcanic orange
+   accent used sparingly, crimson record red reserved for recording state. */
+:root {
+  --bg-stage: #050505;
+  --bg-app: #0c0c0c;
+  --surface-1: #111111;
+  --surface-1-hi: #171717;
+  --surface-2: #1c1c1c;
+  --surface-3: #262626;
+  --line: rgba(235, 235, 235, 0.10);
+  --line-soft: rgba(235, 235, 235, 0.062);
+  --hairline-top: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  --text: #ebebeb;
+  --text-2: #b8b8b8;
+  --text-3: #8c8c8c;
+  --light: #f2f2f2;
+  --white: #ffffff;
+
+  --accent: #e84e0f;
+  --accent-hover: #ee6416;
+  --accent-press: #d8480e;
+  --accent-deep: #a33506;
+  --accent-ink: #0a0200;
+  --accent-soft: #2d0e00;
+  --accent-glow: rgba(232, 78, 15, 0.30);
+  --accent-rgb: 232, 78, 15;
+  --accent-2: #f07d1a;
+  --accent-2-rgb: 240, 125, 26;
+  --accent-2-soft: #1f0a00;
+  --accent-grad: linear-gradient(118deg, #e84e0f 0%, #f07d1a 100%);
+  --accent-grad-hover: linear-gradient(118deg, #ee6416 0%, #f48a2c 100%);
+  --accent-grad-press: linear-gradient(118deg, #d8480e 0%, #e06f14 100%);
+  --accent-grad-text: linear-gradient(100deg, #f07d1a 0%, #e84e0f 100%);
+
+  /* Glass: translucent layers over the glow, a bright top edge, blur only on small fixed surfaces. */
+  --glass-bg: linear-gradient(180deg, rgba(255, 255, 255, 0.062), rgba(255, 255, 255, 0.024));
+  --glass-bg-strong: linear-gradient(180deg, rgba(28, 28, 28, 0.92), rgba(17, 17, 17, 0.95));
+  --glass-border: rgba(235, 235, 235, 0.11);
+  --glass-edge: inset 0 1px 0 rgba(255, 255, 255, 0.085);
+  --glass-blur: blur(18px) saturate(150%);
+  --app-glow:
+    radial-gradient(1100px 560px at 8% -10%, rgba(232, 78, 15, 0.12), transparent 62%),
+    radial-gradient(980px 640px at 96% 0%, rgba(240, 125, 26, 0.05), transparent 64%),
+    radial-gradient(1200px 700px at 55% 125%, rgba(45, 14, 0, 0.45), transparent 62%);
+
+  --record: #e5193a;
+  --record-hover: #d41535;
+  --record-soft: rgba(229, 25, 58, 0.16);
+  --success: #2fd06a;
+  --success-soft: #0b2416;
+  --info: #4a8dff;
+  --info-soft: #121733;
+  --warning: #ffcf2e;
+  --danger: #e5193a;
+
+  --track-screen: #3d86ff;
+  --track-screen-rgb: 61, 134, 255;
+  --track-camera: #2fd06a;
+  --track-camera-rgb: 47, 208, 106;
+  --track-audio: #ffcf2e;
+  --track-audio-rgb: 255, 207, 46;
+  --track-zoom: #06b6d4;
+  --track-zoom-rgb: 6, 182, 212;
+  --track-privacy: #e5193a;
+  --track-privacy-rgb: 229, 25, 58;
+  --track-magnifier: #c58cff;
+  --track-magnifier-rgb: 197, 140, 255;
+  --track-overlay: #f2f2f2;
+
+  --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  --font-display: -apple-system, BlinkMacSystemFont, "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", "Cascadia Code", Consolas, monospace;
+
+  --fs-11: 11px;
+  --fs-12: 12px;
+  --fs-13: 13px;
+  --fs-15: 15px;
+  --fs-18: 18px;
+  --fs-24: 24px;
+  --fs-32: 32px;
+
+  --r-sm: 7px;
+  --r-md: 10px;
+  --r-lg: 14px;
+  --r-xl: 20px;
+
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 16px;
+  --s-5: 24px;
+  --s-6: 32px;
+  --s-7: 48px;
+
+  --ease: cubic-bezier(0.3, 0, 0.1, 1);
+  --t-fast: 120ms;
+  --t-med: 200ms;
+  --t-slow: 320ms;
+
+  --shadow-pop: 0 24px 64px rgba(0, 0, 0, 0.6), 0 2px 8px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.07);
+  --shadow-card: inset 0 1px 0 rgba(255, 255, 255, 0.06), 0 10px 30px rgba(0, 0, 0, 0.32);
+  --focus: 0 0 0 2px var(--bg-app), 0 0 0 4px var(--accent-2);
+
+  color-scheme: dark;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --t-fast: 0ms;
+    --t-med: 0ms;
+    --t-slow: 0ms;
+  }
+}

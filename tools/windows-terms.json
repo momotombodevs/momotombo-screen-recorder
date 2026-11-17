@@ -1,0 +1,13 @@
+{
+  "$comment": "Two decisions about Microsoft's d3dcompiler_47.dll in the Windows package. While both are empty, tools/codec-audit.mjs reports a release blocker for the Windows package. legalReview: the legal review of the user terms text (tools/notices-supplement/MICROSOFT-D3DCOMPILER-TERMS.txt). indemnity: the Windows SDK license requires the distributor to indemnify, defend and hold Microsoft harmless against claims related to distribution and use; this records that the distributor knowingly accepted that duty. Momotombo Devs, the distributor of this fork, has not made either decision yet. Only the distributor fills in these fields. Record shape (as tools/codec-audit.mjs reads it): indemnity = {accepted: true, by, date, how}; legalReview = {done: true, by, date}, or for a decision to publish without review {done: false, riskAcceptedBy, date, how}. done:false is not a blocker, but the audit shows a visible warning every time it runs.",
+  "termsVersion": "2026-10-17",
+  "termsFile": "tools/notices-supplement/MICROSOFT-D3DCOMPILER-TERMS.txt",
+  "sdkLicense": {
+    "url": "https://aka.ms/WinSDKLicenseURL",
+    "fetched": "2026-10-17",
+    "sha256": "dd07eb178e00c6bba4148457fc00ff77cd4887eb521d504186fe59c9ec8bbe62",
+    "note": "Microsoft's online Windows SDK license (RTF). The DLL Electron brings is from the 10.0.26100 SDK; not compared with the license text in that SDK's installer."
+  },
+  "legalReview": null,
+  "indemnity": null
+}

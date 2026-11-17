@@ -1,0 +1,44 @@
+USER TERMS FOR A MICROSOFT COMPONENT (d3dcompiler_47.dll)
+Version 2026-10-17
+
+The Windows version of Momotombo includes Microsoft Corporation's "Direct3D HLSL Compiler" file
+(d3dcompiler_47.dll). This file is not Momotombo's; it is distributed with Momotombo as distributable code
+under the terms of Microsoft's Windows SDK license. Microsoft makes this distribution conditional on
+users accepting the terms below. You must accept them to use Momotombo on Windows.
+
+These terms apply ONLY to the file d3dcompiler_47.dll. They do not change Momotombo's own license
+(PolyForm Shield 1.0.0) or the licenses of the open-source components in the app. In particular, they
+do not restrict the rights the LGPL gives you for the FFmpeg libraries (LGPL-2.1): you may modify those
+libraries, replace them with modified versions and do the reverse engineering needed for that.
+
+1. The file is licensed, not sold. Microsoft reserves all rights not expressly granted in these terms.
+2. You may use the file only as part of Momotombo and only on Microsoft Windows.
+3. Unless applicable law gives you more rights despite this limitation, you may not:
+   a. work around any technical limitations in the file;
+   b. reverse engineer, decompile or disassemble the file, except and only to the extent that
+      applicable law expressly permits, despite this limitation;
+   c. publish the file for others to copy; rent, lease or lend it; or transfer it to anyone apart from
+      Momotombo;
+   d. use the file for commercial software hosting services;
+   e. disclose the results of any benchmark test of the file to a third party without Microsoft's
+      prior written approval.
+4. You may not alter or remove any copyright, trademark or patent notice in the file.
+5. If you distribute Momotombo to others, you must have them accept these terms too.
+6. The file is subject to United States export laws and regulations. You must comply with all domestic
+   and international export laws and regulations that apply to it (www.microsoft.com/exporting).
+7. Microsoft does not provide support services for the file.
+8. NO WARRANTY. The file is provided "as is"; you bear the risk of using it. Microsoft gives no express
+   warranties, guarantees or conditions. You may have consumer rights under your local laws which these
+   terms cannot change. To the extent permitted under your local laws, Microsoft excludes the implied
+   warranties of merchantability, fitness for a particular purpose and non-infringement.
+9. LIMITATION OF LIABILITY. You can recover from Microsoft and its suppliers only direct damages up to
+   U.S. $5.00. You cannot recover any other damages, including consequential, lost profits, special,
+   indirect or incidental damages. This limitation applies to anything related to the file, content
+   on third-party internet sites or third-party programs, and, to the extent permitted by applicable
+   law, to claims for breach of contract, breach of warranty, guarantee or condition, strict liability,
+   negligence or other tort. It applies even if Microsoft knew or should have known about the
+   possibility of the damages. Some countries may not allow this limitation; in that case your local
+   law applies.
+
+These terms are written to pass the protections of Microsoft's Windows SDK license on to end users.
+Microsoft's rights in the file are not limited to this text.

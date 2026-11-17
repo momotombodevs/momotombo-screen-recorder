@@ -1,0 +1,308 @@
+# First-start flow of the Microsoft d3dcompiler_47.dll terms on Windows (apps/desktop/src/main/windows-terms.ts),
+# driven from outside like a person would: the app is started normally (not in a test mode), the
+# system dialog is found with Windows' own UI Automation and its buttons are pressed.
+#
+#   powershell -NoProfile -ExecutionPolicy Bypass -File terms-flow.ps1 -Exe <Momotombo.exe | electron.exe> [-AppArg <app folder>] -Out <folder>
+#
+# -AppArg is the app folder when -Exe is the development electron.exe. Every scenario uses its own
+# throwaway settings folder (MOMOTOMBO_TEST_HOME), never the user's. Scenarios:
+#   decline   dialog shown before any window, d3dcompiler_47.dll not loaded meanwhile; "decline"
+#             quits the app and nothing is recorded
+#   accept    "accept" records the acceptance and the app starts again by itself, now with
+#             hardware acceleration (the DLL is loaded) and without the dialog
+#   accepted  a later start with the recorded acceptance: no dialog
+#   no-dll    a copy of the app folder without the DLL: no dialog, the main window opens
+# Not automated: "Read the terms" opens the text in another program; only the file is checked.
+# Writes terms-flow.json to -Out. Exit code 0 when every scenario passed. ASCII only (PowerShell 5.1).
+param(
+  [Parameter(Mandatory = $true)][string]$Exe,
+  [string]$AppArg,
+  [Parameter(Mandatory = $true)][string]$Out,
+  # The development electron.exe keeps the DLL under its real name: it is loaded before the answer
+  # there, as expected; only the dialog and its answers are judged. The package sets it aside.
+  [switch]$Development,
+  # The app's own language setting for every scenario (settings.json in the throwaway userData),
+  # as a user who picked it under Settings; 'auto' follows Windows' display language.
+  [ValidateSet('auto', 'es', 'en')][string]$Language = 'auto',
+  # What the dialog must say (UTF-8 from the caller): its title and its three buttons, '|'-separated.
+  [string]$ExpectTitle,
+  [string]$ExpectButtons,
+  # Only these scenarios (comma-separated); all when empty.
+  [string]$Only
+)
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
+$A = [System.Windows.Automation.AutomationElement]
+$TreeScope = [System.Windows.Automation.TreeScope]
+
+New-Item -ItemType Directory -Force -Path $Out | Out-Null
+$Out = (Resolve-Path $Out).Path
+$Exe = (Resolve-Path $Exe).Path
+$results = @()
+
+function AppProcesses([string]$exePath) {
+  @(Get-Process -ErrorAction SilentlyContinue | Where-Object { try { $_.Path -eq $exePath } catch { $false } })
+}
+function StopApp([string]$exePath) {
+  AppProcesses $exePath | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
+  Start-Sleep -Milliseconds 800
+}
+# Which copy of d3dcompiler_47.dll is loaded, by which of the app's processes: the one shipped
+# next to the app (the terms are about that one) or Windows' own in System32.
+function DllUse([string]$exePath) {
+  $bundled = Join-Path (Split-Path $exePath) 'd3dcompiler_47.dll'
+  $use = @()
+  foreach ($p in (AppProcesses $exePath)) {
+    $type = try { $c = (Get-CimInstance Win32_Process -Filter "ProcessId=$($p.Id)").CommandLine; if ($c -match '--type=([\w-]+)') { $Matches[1] } else { 'browser' } } catch { '?' }
+    try {
+      foreach ($m in ($p.Modules | Where-Object { $_.ModuleName -ieq 'd3dcompiler_47.dll' })) {
+        $use += [ordered]@{ process = $type; path = $m.FileName; bundled = ($m.FileName -ieq $bundled) }
+      }
+    } catch { }
+  }
+  return , $use
+}
+# How the Microsoft DLL lies next to the app: under its own name, or set aside until the terms
+# are accepted (d3dcompiler_47.dll.terms-pending).
+function DllFiles([string]$exePath) {
+  $d = Split-Path $exePath
+  [ordered]@{ active = (Test-Path (Join-Path $d 'd3dcompiler_47.dll')); pending = (Test-Path (Join-Path $d 'd3dcompiler_47.dll.terms-pending')) }
+}
+function DllLoaded([string]$exePath) { @((DllUse $exePath) | Where-Object { $_.bundled }).Count -gt 0 }
+# Top-level windows of the app's processes: dialogs (#32770) and app windows.
+function AppWindows([string]$exePath) {
+  $ids = @(AppProcesses $exePath | ForEach-Object { $_.Id })
+  if ($ids.Count -eq 0) { return @() }
+  $all = $A::RootElement.FindAll($TreeScope::Children, [System.Windows.Automation.Condition]::TrueCondition)
+  @($all | Where-Object { $ids -contains $_.Current.ProcessId })
+}
+function WaitFor([scriptblock]$cond, [int]$seconds) {
+  $deadline = (Get-Date).AddSeconds($seconds)
+  while ((Get-Date) -lt $deadline) { $v = & $cond; if ($v) { return $v }; Start-Sleep -Milliseconds 250 }
+  return $null
+}
+function Dialog([string]$exePath) { AppWindows $exePath | Where-Object { $_.Current.ClassName -eq '#32770' } | Select-Object -First 1 }
+function MainWindow([string]$exePath) { AppWindows $exePath | Where-Object { $_.Current.ClassName -ne '#32770' -and $_.Current.Name -match 'Momotombo' } | Select-Object -First 1 }
+# The dialog's buttons in order. Electron's message box is a Windows task dialog: its buttons are
+# "CCPushButton" panes with AutomationIds CommandButton_100, _101, ... (seen on Windows Server 2025).
+function Buttons($dialog) {
+  $all = @($dialog.FindAll($TreeScope::Descendants, [System.Windows.Automation.Condition]::TrueCondition))
+  $cmd = @($all | Where-Object { $_.Current.AutomationId -like 'CommandButton_*' } | Sort-Object { [int]($_.Current.AutomationId -replace '\D', '') })
+  if ($cmd.Count) { return , $cmd }
+  return , @($all | Where-Object { $_.Current.ControlType -eq [System.Windows.Automation.ControlType]::Button })
+}
+# Invoke when the button offers it; the task dialog's command buttons (CCPushButton panes) may
+# not, then the button gets the keyboard focus through UI Automation and Space presses it.
+# (.NET Framework's UI Automation has no LegacyIAccessible pattern.)
+function Press($button) {
+  $p = $null
+  if ($button.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$p)) { $p.Invoke(); return 'UI Automation (Invoke)' }
+  $button.SetFocus(); Start-Sleep -Milliseconds 300; [System.Windows.Forms.SendKeys]::SendWait(' '); return 'UI Automation focus + Space'
+}
+# The dialog's buttons, waited for (the window can appear before its contents).
+function WaitButtons($dialog) {
+  $found = WaitFor { $b = Buttons $dialog; if ($b.Count -ge 3) { , $b } } 15
+  if ($found) { return , $found }
+  return , @()
+}
+# What UI Automation sees inside the dialog, for the log when the buttons are not found.
+function DumpTree($dialog) {
+  $all = $dialog.FindAll($TreeScope::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
+  @($all | ForEach-Object { "{0}|{1}|{2}|{3}" -f $_.Current.ControlType.ProgrammaticName, $_.Current.ClassName, $_.Current.AutomationId, $_.Current.Name })
+}
+Add-Type -AssemblyName System.Windows.Forms
+# Keyboard fallback, as a person would: the dialog's default button is "Read the terms" (index 1),
+# Escape is its cancel button ("Decline", index 2), Shift+Tab from the default reaches "Accept".
+function PressByKeys($dialog, [string]$which) {
+  try { $dialog.SetFocus() } catch { }
+  Start-Sleep -Milliseconds 300
+  if ($which -eq 'decline') { [System.Windows.Forms.SendKeys]::SendWait('{ESC}') } else { [System.Windows.Forms.SendKeys]::SendWait('+{TAB}'); Start-Sleep -Milliseconds 200; [System.Windows.Forms.SendKeys]::SendWait(' ') }
+}
+function Answer($r, $dialog, [string]$which) {
+  $btn = WaitButtons $dialog
+  $r.buttons = @($btn | ForEach-Object { $_.Current.Name })
+  $r.dialogTitle = $dialog.Current.Name
+  if ($ExpectTitle -or $ExpectButtons) {
+    $want = @($ExpectButtons -split '\|')
+    $r.textsAsExpected = ((-not $ExpectTitle) -or $r.dialogTitle -eq $ExpectTitle) -and ((-not $ExpectButtons) -or (($r.buttons -join '|') -eq ($want -join '|')))
+    if (-not $r.textsAsExpected) { $r.notes += "text differs from expected: title '$($r.dialogTitle)', buttons '$($r.buttons -join '|')'" }
+  }
+  if ($btn.Count -ge 3) {
+    $r.answeredBy = Press $btn[$(if ($which -eq 'decline') { 2 } else { 0 })]
+    # Still open after 5 s: answer with the keyboard instead (Escape / Shift+Tab, Space).
+    if (-not (WaitFor { if (-not (Dialog $script:CurrentExe)) { $true } } 5)) { PressByKeys $dialog $which; $r.answeredBy += ' -> keyboard' }
+    return
+  }
+  $r.tree = DumpTree $dialog
+  $r.notes += "buttons not found ($($btn.Count)); answered with the keyboard"
+  PressByKeys $dialog $which
+  $r.answeredBy = 'keyboard'
+}
+function Start-App([string]$exePath, [string]$th) {
+  $script:CurrentExe = $exePath
+  if ($Language -ne 'auto') {
+    New-Item -ItemType Directory -Force -Path (Join-Path $th 'userData') | Out-Null
+    $json = '{ "language": "' + $Language + '" }'
+    [System.IO.File]::WriteAllText((Join-Path $th 'userData\settings.json'), $json, (New-Object System.Text.UTF8Encoding($false)))
+  }
+  $env:MOMOTOMBO_TEST_HOME = $th
+  $argList = @(); if ($AppArg) { $argList += '"' + $AppArg + '"' }
+  if ($argList.Count) { Start-Process -FilePath $exePath -ArgumentList $argList -PassThru } else { Start-Process -FilePath $exePath -PassThru }
+}
+function StateFile([string]$th) { Join-Path $th 'userData\third-party-terms.json' }
+function Shot([string]$name) {
+  try {
+    Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+    $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+    $bmp = New-Object System.Drawing.Bitmap($b.Width, $b.Height)
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    $g.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
+    $bmp.Save((Join-Path $Out "$name.png"), [System.Drawing.Imaging.ImageFormat]::Png)
+    $g.Dispose(); $bmp.Dispose()
+  } catch { }
+}
+function Scenario([string]$name, [scriptblock]$body) {
+  if ($Only -and -not (($Only -split ',') -contains $name)) { return }
+  Write-Host "== $name"
+  $r = [ordered]@{ scenario = $name; ok = $false; notes = @() }
+  try { & $body $r } catch { $r.notes += "error: $($_.Exception.Message)" }
+  $r.dllFilesAfter = DllFiles $(if ($r.exeUsed) { $r.exeUsed } else { $Exe })
+  $script:results += $r
+  Write-Host ("   {0} {1}" -f $(if ($r.ok) { 'OK ' } else { 'FAIL' }), ($r.notes -join ' | '))
+}
+
+$work = Join-Path ([System.IO.Path]::GetTempPath()) ("momotombo-terms-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+New-Item -ItemType Directory -Force -Path $work | Out-Null
+$dllPresent = DllFiles $Exe  # before any scenario: real name, or set aside (.terms-pending)
+StopApp $Exe
+
+Scenario 'decline' {
+  param($r)
+  $th = Join-Path $work 'decline'
+  $p = Start-App $Exe $th
+  $d = WaitFor { Dialog $Exe } 45
+  if (-not $d) { $r.notes += 'dialog did not appear'; Shot 'terms-decline-none'; return }
+  $r.title = $d.Current.Name
+  $r.windowsBeforeAnswer = @(AppWindows $Exe | ForEach-Object { "$($_.Current.ClassName)|$($_.Current.Name)" })
+  Start-Sleep -Seconds 2  # the GPU process (if any) has started by now
+  $r.dllUseBeforeAnswer = DllUse $Exe
+  $r.dllLoadedBeforeAnswer = DllLoaded $Exe
+  $r.processesBeforeAnswer = @(AppProcesses $Exe | ForEach-Object { try { $c = (Get-CimInstance Win32_Process -Filter "ProcessId=$($_.Id)").CommandLine; if ($c -match '--type=([\w-]+)') { $Matches[1] } else { 'browser' } } catch { '?' } })
+  Shot 'terms-dialog'
+  Answer $r $d 'decline'
+  $gone = WaitFor { if ((AppProcesses $Exe).Count -eq 0) { $true } } 20
+  $r.exited = [bool]$gone
+  $r.stateRecorded = Test-Path (StateFile $th)
+  $f = DllFiles $Exe
+  # Declining leaves the DLL set aside (package) or where it was (development).
+  $filesOk = $Development -or ($f.pending -and -not $f.active)
+  $r.ok = ($r.textsAsExpected -ne $false) -and $r.exited -and -not $r.stateRecorded -and ($Development -or -not $r.dllLoadedBeforeAnswer) -and $filesOk -and @($r.windowsBeforeAnswer | Where-Object { -not $_.StartsWith('#32770|') }).Count -eq 0
+  if ($r.dllLoadedBeforeAnswer) { $r.notes += 'the DLL next to the app was loaded before the answer' }
+  if (-not $filesOk) { $r.notes += "DLL files after decline: active $($f.active), pending $($f.pending)" }
+  StopApp $Exe
+}
+
+Scenario 'accept' {
+  param($r)
+  $th = Join-Path $work 'accept'
+  $p = Start-App $Exe $th
+  $d = WaitFor { Dialog $Exe } 45
+  if (-not $d) { $r.notes += 'dialog did not appear'; return }
+  $first = $p.Id
+  Start-Sleep -Seconds 2
+  $r.dllUseBeforeAnswer = DllUse $Exe
+  $r.dllLoadedBeforeAnswer = DllLoaded $Exe
+  Answer $r $d 'accept'
+  $r.stateRecorded = [bool](WaitFor { Test-Path (StateFile $th) } 15)
+  if ($r.stateRecorded) { $r.state = Get-Content (StateFile $th) -Raw | ConvertFrom-Json }
+  # The app starts itself again (a new process) and opens its main window.
+  $main = WaitFor { MainWindow $Exe } 60
+  $r.relaunched = [bool]$main -and -not (Get-Process -Id $first -ErrorAction SilentlyContinue)
+  $r.dialogAgain = [bool](Dialog $Exe)
+  Start-Sleep -Seconds 3
+  $r.dllUseAfter = DllUse $Exe
+  $r.dllLoadedAfter = DllLoaded $Exe
+  Shot 'terms-after-accept'
+  $f = DllFiles $Exe
+  # Accepting gives the DLL its real name (package); the restarted app loads that copy.
+  $filesOk = $f.active -and -not $f.pending
+  $r.ok = ($r.textsAsExpected -ne $false) -and $r.stateRecorded -and $r.relaunched -and -not $r.dialogAgain -and $r.dllLoadedAfter -and ($Development -or -not $r.dllLoadedBeforeAnswer) -and $filesOk
+  if (-not $filesOk) { $r.notes += "DLL files after accept: active $($f.active), pending $($f.pending)" }
+  if (-not $r.dllLoadedAfter) { $r.notes += 'DLL not loaded after accept (is hardware acceleration on?)' }
+  StopApp $Exe
+  $script:acceptedHome = $th
+}
+
+Scenario 'accepted' {
+  param($r)
+  if (-not $script:acceptedHome) { $r.notes += 'the accept scenario left no record'; return }
+  $p = Start-App $Exe $script:acceptedHome
+  $main = WaitFor { MainWindow $Exe } 60
+  $r.mainWindow = [bool]$main
+  $r.dialog = [bool](Dialog $Exe)
+  $r.ok = $r.mainWindow -and -not $r.dialog
+  StopApp $Exe
+}
+
+# An update after acceptance: the new version brings its DLL set aside again; with the acceptance
+# on record the app puts it in place by itself (no dialog) and starts again with it.
+Scenario 'update' {
+  param($r)
+  if (-not $script:acceptedHome) { $r.notes += 'the accept scenario left no record'; return }
+  if ($Development) { $r.ok = $true; $r.notes += 'development: the DLL does not ship under its pending name, skipped'; return }
+  $copy = Join-Path $work 'app-update'
+  Copy-Item -Recurse -Path (Split-Path $Exe) -Destination $copy
+  $active = Join-Path $copy 'd3dcompiler_47.dll'
+  if (Test-Path $active) { Move-Item $active (Join-Path $copy 'd3dcompiler_47.dll.terms-pending') -Force }
+  $exe2 = Join-Path $copy (Split-Path $Exe -Leaf)
+  $r.exeUsed = $exe2
+  $r.dllFilesBefore = DllFiles $exe2
+  $p = Start-App $exe2 $script:acceptedHome
+  $main = WaitFor { MainWindow $exe2 } 60
+  $r.mainWindow = [bool]$main
+  $r.dialog = [bool](Dialog $exe2)
+  Start-Sleep -Seconds 3
+  $r.dllUseAfter = DllUse $exe2
+  $f = DllFiles $exe2
+  $r.ok = $r.mainWindow -and -not $r.dialog -and $f.active -and -not $f.pending -and (@($r.dllUseAfter | Where-Object { $_.bundled }).Count -gt 0)
+  StopApp $exe2
+}
+
+Scenario 'no-dll' {
+  param($r)
+  $copy = Join-Path $work 'app-without-dll'
+  Copy-Item -Recurse -Path (Split-Path $Exe) -Destination $copy
+  Remove-Item (Join-Path $copy 'd3dcompiler_47.dll'), (Join-Path $copy 'd3dcompiler_47.dll.terms-pending') -ErrorAction SilentlyContinue
+  $exe2 = Join-Path $copy (Split-Path $Exe -Leaf)
+  $r.exeUsed = $exe2
+  $th = Join-Path $work 'no-dll'
+  $p = Start-App $exe2 $th
+  $main = WaitFor { MainWindow $exe2 } 60
+  $r.mainWindow = [bool]$main
+  $r.dialog = [bool](Dialog $exe2)
+  Start-Sleep -Seconds 3
+  # Without the bundled copy: which d3dcompiler_47.dll (if any) Chromium loads instead.
+  $r.dllUse = DllUse $exe2
+  $r.stateRecorded = Test-Path (StateFile $th)
+  $r.ok = $r.mainWindow -and -not $r.dialog -and -not $r.stateRecorded
+  StopApp $exe2
+}
+
+$termsFile = Get-ChildItem -Recurse -Path (Split-Path $Exe) -Filter 'MICROSOFT-D3DCOMPILER-TERMS.txt' -ErrorAction SilentlyContinue | Select-Object -First 1
+$summary = [ordered]@{
+  exe = Split-Path $Exe -Leaf
+  dllInPackage = $dllPresent
+  language = $Language
+  systemHasD3dcompiler47 = Test-Path (Join-Path $env:WINDIR 'System32\d3dcompiler_47.dll')
+  termsFileInPackage = [bool]$termsFile
+  notAutomated = 'The Read the terms button opens the text in another program; not automated'
+  scenarios = $results
+}
+$json = $summary | ConvertTo-Json -Depth 6
+$json | Set-Content -Encoding UTF8 (Join-Path $Out 'terms-flow.json')
+Write-Host $json
+Remove-Item Env:\MOMOTOMBO_TEST_HOME -ErrorAction SilentlyContinue
+Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
+$failed = @($results | Where-Object { -not $_.ok }).Count
+Write-Host "Terms flow: $($results.Count - $failed)/$($results.Count) scenarios passed"
+exit $(if ($failed -eq 0) { 0 } else { 1 })

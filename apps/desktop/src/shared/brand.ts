@@ -1,0 +1,9 @@
+export const APP_NAME = 'Momotombo';
+export const APP_VERSION = '0.1.0';
+export const DEVELOPER = 'Momotombo Devs';
+export const COPYRIGHT = 'Copyright © 2026 Momotombo Devs';
+export const LICENSE_NAME = 'PolyForm Shield License 1.0.0';
+export const WEBSITE_URL = 'https://momotombo.dev';
+export const PROJECTS_FOLDER = 'Proyectos Momotombo';
+export const MEDIA_SCHEME = 'momotombo-media';
+export const PROJECT_FILE = 'project.json';

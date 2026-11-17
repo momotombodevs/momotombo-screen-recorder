@@ -1,0 +1,37 @@
+{
+  "name": "@momotombo/desktop",
+  "productName": "Momotombo",
+  "version": "0.1.0",
+  "author": "Momotombo Devs",
+  "license": "PolyForm-Shield-1.0.0",
+  "private": true,
+  "description": "Momotombo: screen recording and video editing",
+  "main": "dist/main/main.cjs",
+  "scripts": {
+    "build:main": "node scripts/build-main.mjs",
+    "build:renderer": "vite build",
+    "build:licenses": "node scripts/build-licenses.mjs",
+    "build": "pnpm run build:main && pnpm run build:renderer && pnpm run build:licenses",
+    "dev": "pnpm run build && pnpm run start",
+    "start": "node scripts/start.mjs",
+    "smoke": "pnpm run build && electron . --smoke"
+  },
+  "dependencies": {
+    "@momotombo/compositor": "workspace:*",
+    "@momotombo/media-web": "workspace:*",
+    "@momotombo/project-model": "workspace:*",
+    "@momotombo/protocol": "workspace:*",
+    "@momotombo/timing": "workspace:*",
+    "@momotombo/zoom-engine": "workspace:*",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "electron": "44.8.0",
+    "esbuild": "0.28.2",
+    "vite": "8.3.4"
+  }
+}

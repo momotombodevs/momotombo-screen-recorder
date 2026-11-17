@@ -1,0 +1,331 @@
+name: Windows
+
+# Windows test on GitHub's windows-latest runner (Windows Server, no graphics card). Separate from
+# ci.yml (macOS) so neither starts the other: this one runs only on pushes to ci/windows* branches
+# or by hand (Actions → Windows → Run workflow, once this file is on the default branch).
+# One run collects as much as it can: every test step continues on failure, records its outcome,
+# and the last step decides the job's result. Everything is uploaded as the "windows-test" artifact.
+on:
+  push:
+    branches: ['ci/windows**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 75
+    env:
+      MOMOTOMBO_DIST: mp4
+      # The app's own test timeout: exports run at a few frames per second here (no graphics card).
+      MOMOTOMBO_TEST_TIMEOUT_MIN: '20'
+      OUT: ${{ github.workspace }}\out-ci
+      # Electron's download cache (electron/install.js, tools/electron-artifacts.mjs), outside the checkout.
+      # actions/cache refuses paths with '..'; .cache/ is git-ignored.
+      electron_config_cache: ${{ github.workspace }}\.cache\ci-electron
+      # 'false' skips the packaged-app steps (package.mjs on Windows needs zig for momotombo-win.exe).
+      PACKAGED: 'true'
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      # Windows images check text files out with CRLF line ends; the repository's files (and the
+      # tests comparing generated files with them) are LF.
+      - name: git LF
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # Before anything is installed: what this Windows has (Media Foundation, GPU, session, screen).
+      # Also compiles tests/media-check/mf-check.ps1 first, so a mistake there shows in the first minute.
+      - name: Environment dump
+        id: env
+        continue-on-error: true
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/windows-env/env-dump.ps1 -Out "$env:OUT\env"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+
+      - run: corepack enable
+
+      # Electron 44 downloads its binary on first use (no install script); installed here from a
+      # cache kept between runs. The same folder holds package.mjs's Electron and FFmpeg zips and
+      # the Zig archive (zig\).
+      - name: Electron cache
+        id: electron-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.electron_config_cache }}
+          key: electron-zig-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', 'tools/zig-fetch.mjs') }}
+
+      - name: pnpm install
+        run: pnpm install --frozen-lockfile
+
+      - name: Electron binary
+        run: pnpm --filter @momotombo/desktop exec node node_modules/electron/install.js
+
+      # Zig 0.17.0 (MIT, build tool only) for momotombo-win.exe, the same tool the released helper is
+      # built with: official ziglang.org archive, SHA-256 pinned in tools/zig-fetch.mjs (fails on mismatch).
+      - name: Zig
+        id: zig
+        if: env.PACKAGED == 'true'
+        continue-on-error: true
+        env:
+          MOMOTOMBO_ZIG_CACHE: ${{ env.electron_config_cache }}\zig
+        run: node tools/zig-fetch.mjs
+
+      # Packaging first: it builds the app and momotombo-win.exe (pointer helper, Media Foundation audio),
+      # which the development runs below then use too (native/helper-windows/bin).
+      - name: Windows package
+        id: package
+        if: env.PACKAGED == 'true' && steps.zig.outcome == 'success'
+        continue-on-error: true
+        run: node apps/desktop/scripts/package.mjs --platform win32 --arch x64
+
+      # The release audit of the Windows package as release-assets.mjs runs it (--release --probe):
+      # for the report only. It reports release blockers until the distributor decides on the
+      # d3dcompiler_47.dll records in tools/windows-terms.json; warnings are listed. The FFmpeg
+      # source archive release-assets also needs is not fetched here, so its line is expected.
+      - name: Release audit (information)
+        if: steps.package.outcome == 'success'
+        continue-on-error: true
+        run: |
+          New-Item -ItemType Directory -Force -Path "$env:OUT" | Out-Null
+          node tools/codec-audit.mjs apps/desktop/out/mp4/win32-x64 --profile mp4 --probe --release --json "$env:OUT\codec-audit-release-win32-x64.json"
+          Write-Host "codec-audit --release exit code: $LASTEXITCODE"
+
+      # The helper's own encoder check, as the app runs it before an export (route 2).
+      - name: Helper encode probe
+        id: helper_probe
+        if: steps.package.outcome == 'success'
+        continue-on-error: true
+        run: |
+          $exe = 'apps/desktop/out/mp4/win32-x64/resources/bin/momotombo-win.exe'
+          $file = Join-Path $env:RUNNER_TEMP 'momotombo-probe.mp4'
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          $out = & $exe --encode-probe $file 2>&1
+          $code = $LASTEXITCODE
+          $result = [ordered]@{ exitCode = $code; ms = $sw.ElapsedMilliseconds; output = @($out | ForEach-Object { "$_" }); fileLeft = (Test-Path $file) }
+          New-Item -ItemType Directory -Force -Path "$env:OUT" | Out-Null
+          $result | ConvertTo-Json -Depth 4 | Tee-Object -FilePath "$env:OUT\helper-encode-probe.json"
+          exit $code
+
+      - name: Typecheck
+        id: typecheck
+        continue-on-error: true
+        run: pnpm typecheck
+
+      # This system's platform-specific build tools (esbuild, rolldown, TypeScript, lightningcss),
+      # read from the installed packages' package.json and license files, for
+      # docs/licenses/platform-packages.json. Printed only; nothing in the checkout changes.
+      - name: Platform packages (license records)
+        continue-on-error: true
+        run: |
+          New-Item -ItemType Directory -Force -Path "$env:OUT" | Out-Null
+          node tools/license-inventory.mjs --print-platform | Tee-Object -FilePath "$env:OUT\platform-packages-win32-x64.json"
+
+      - name: Unit tests
+        id: unit
+        continue-on-error: true
+        run: pnpm test
+
+      # The development runs below use the app built by the packaging step (dist). The smoke test runs
+      # on the package (with and without its Microsoft DLL); a development smoke run would repeat it.
+      # The interface test, ending with a real screen recording through Chromium while
+      # windows-clicks.ps1 clicks on the desktop.
+      - name: UI test + real capture (development)
+        id: dev_ui
+        continue-on-error: true
+        run: |
+          $sig = Join-Path $env:RUNNER_TEMP 'momotombo-signals-dev'
+          New-Item -ItemType Directory -Force -Path $sig | Out-Null
+          $clicker = Start-Process powershell.exe -PassThru -WindowStyle Hidden -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'tests/real-capture-web/windows-clicks.ps1', '-SignalDir', $sig)
+          $env:MOMOTOMBO_TEST_REAL_CAPTURE = '1'
+          $env:MOMOTOMBO_TEST_SIGNAL_DIR = $sig
+          # No graphics card here: MP4 must go through Windows' Media Foundation encoders (route 2).
+          $env:MOMOTOMBO_TEST_EXPECT_ROUTE = 'mf'
+          node apps/desktop/scripts/run-suite.mjs ui --single --no-build --out "$env:OUT\dev" --timeout 25
+          $code = $LASTEXITCODE
+          Stop-Process -Id $clicker.Id -Force -ErrorAction SilentlyContinue
+          Copy-Item (Join-Path $sig 'clicks.json') "$env:OUT\dev\uitest-clicks.json" -ErrorAction SilentlyContinue
+          exit $code
+
+      # Microsoft d3dcompiler_47.dll terms on first start with the development electron.exe, whose DLL is
+      # under its real name (not set aside like in the package): the dialog and its answers are checked,
+      # the DLL being loaded before the answer is expected there. The package's own check is below.
+      - name: Terms flow (development)
+        id: dev_terms
+        continue-on-error: true
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/windows-terms/terms-flow.ps1 -Exe apps/desktop/node_modules/electron/dist/electron.exe -AppArg "$env:GITHUB_WORKSPACE\apps\desktop" -Out "$env:OUT\dev-terms" -Development
+
+      # Route 2 unavailable: the development app without its helper (renamed for this step only) must
+      # write WebM instead of MP4 and say so (route 3). Export steps only.
+      - name: Export without the helper (development)
+        id: dev_nohelper
+        continue-on-error: true
+        run: |
+          $helper = 'native/helper-windows/bin/momotombo-win.exe'
+          if (Test-Path $helper) { Rename-Item $helper 'momotombo-win.exe.off' }
+          try {
+            $env:MOMOTOMBO_UITEST_ONLY = 'export'
+            $env:MOMOTOMBO_TEST_EXPECT_ROUTE = 'webm-fallback'
+            node apps/desktop/scripts/run-suite.mjs ui --no-build --out "$env:OUT\dev-nohelper" --timeout 10
+            $code = $LASTEXITCODE
+          } finally {
+            if (Test-Path "$helper.off") { Rename-Item "$helper.off" 'momotombo-win.exe' }
+          }
+          exit $code
+
+      # Saved after packaging, so the Windows Electron/FFmpeg zips are kept too, even when a later step fails.
+      - name: Save Electron cache
+        if: always() && steps.electron-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.electron_config_cache }}
+          key: electron-zig-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', 'tools/zig-fetch.mjs') }}
+
+      # The package ships the Microsoft DLL as d3dcompiler_47.dll.terms-pending; accepting the terms
+      # gives it its real name (windows-terms.ts). This runs first, so the steps after it test the
+      # package as it is once accepted. Decline, accept + restart, accepted, update, no DLL.
+      - name: Terms flow (packaged)
+        id: pkg_terms
+        if: env.PACKAGED == 'true' && steps.package.outcome == 'success'
+        continue-on-error: true
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/windows-terms/terms-flow.ps1 -Exe apps/desktop/out/mp4/win32-x64/Momotombo.exe -Out "$env:OUT\packaged-terms"
+
+      # The terms dialog in Spanish: the app's own language setting (settings.json "language": "es", as a
+      # user picks it under Settings), on a copy of the package with the DLL set aside again. Windows'
+      # display language stays English: a Spanish Windows needs a language pack, not installed here.
+      - name: Terms flow in Spanish (packaged)
+        id: pkg_terms_es
+        if: env.PACKAGED == 'true' && steps.package.outcome == 'success'
+        continue-on-error: true
+        run: |
+          $copy = Join-Path $env:RUNNER_TEMP 'momotombo-terms-es'
+          Remove-Item -Recurse -Force $copy -ErrorAction SilentlyContinue
+          Copy-Item -Recurse -Path apps/desktop/out/mp4/win32-x64 -Destination $copy
+          $active = Join-Path $copy 'd3dcompiler_47.dll'
+          if (Test-Path $active) { Move-Item $active "$active.terms-pending" -Force }
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/windows-terms/terms-flow.ps1 -Exe (Join-Path $copy 'Momotombo.exe') -Out "$env:OUT\packaged-terms-es" -Language es -Only 'decline,accept' -ExpectTitle 'Términos de un componente de Microsoft' -ExpectButtons 'Acepto|Leer los términos|No acepto'
+
+      - name: Smoke (packaged)
+        id: pkg_smoke
+        if: env.PACKAGED == 'true' && steps.package.outcome == 'success'
+        continue-on-error: true
+        # dll-watch.ps1 records which d3dcompiler_47.dll the app's processes load meanwhile (path, type, version).
+        run: |
+          New-Item -ItemType Directory -Force -Path "$env:OUT\packaged" | Out-Null
+          $exe = (Resolve-Path apps/desktop/out/mp4/win32-x64/Momotombo.exe).Path
+          $watch = Start-Process powershell.exe -PassThru -WindowStyle Hidden -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'tests/windows-terms/dll-watch.ps1', '-Exe', $exe, '-Out', "$env:OUT\packaged\dll-watch-smoke.json")
+          node apps/desktop/scripts/run-suite.mjs smoke --app apps/desktop/out/mp4/win32-x64 --out "$env:OUT\packaged" --timeout 25
+          $code = $LASTEXITCODE
+          $watch | Wait-Process -Timeout 30 -ErrorAction SilentlyContinue
+          exit $code
+
+      - name: UI test + real capture (packaged)
+        id: pkg_ui
+        if: env.PACKAGED == 'true' && steps.package.outcome == 'success'
+        continue-on-error: true
+        run: |
+          $sig = Join-Path $env:RUNNER_TEMP 'momotombo-signals-pkg'
+          New-Item -ItemType Directory -Force -Path $sig | Out-Null
+          $clicker = Start-Process powershell.exe -PassThru -WindowStyle Hidden -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'tests/real-capture-web/windows-clicks.ps1', '-SignalDir', $sig)
+          $env:MOMOTOMBO_TEST_REAL_CAPTURE = '1'
+          $env:MOMOTOMBO_TEST_SIGNAL_DIR = $sig
+          $env:MOMOTOMBO_TEST_EXPECT_ROUTE = 'mf'
+          node apps/desktop/scripts/run-suite.mjs ui --single --app apps/desktop/out/mp4/win32-x64 --out "$env:OUT\packaged" --timeout 25
+          $code = $LASTEXITCODE
+          Stop-Process -Id $clicker.Id -Force -ErrorAction SilentlyContinue
+          Copy-Item (Join-Path $sig 'clicks.json') "$env:OUT\packaged\uitest-clicks.json" -ErrorAction SilentlyContinue
+          exit $code
+
+      # Route 3 forced in the package (MOMOTOMBO_TEST_EXPORT_ROUTE=webm, test runs only): WebM instead of
+      # MP4, said before and after the export. Export steps only.
+      - name: Export, WebM forced (packaged)
+        id: pkg_webm
+        if: env.PACKAGED == 'true' && steps.package.outcome == 'success'
+        continue-on-error: true
+        run: |
+          $env:MOMOTOMBO_UITEST_ONLY = 'export'
+          $env:MOMOTOMBO_TEST_EXPORT_ROUTE = 'webm'
+          $env:MOMOTOMBO_TEST_EXPECT_ROUTE = 'webm-fallback'
+          node apps/desktop/scripts/run-suite.mjs ui --app apps/desktop/out/mp4/win32-x64 --out "$env:OUT\packaged-webm" --timeout 10
+
+      # A copy of the package without the bundled d3dcompiler_47.dll (System32 is not touched): no terms
+      # dialog, and the whole smoke test; which d3dcompiler_47.dll is loaded instead, and its version.
+      - name: Package without d3dcompiler_47.dll
+        id: pkg_nodll
+        if: env.PACKAGED == 'true' && steps.package.outcome == 'success'
+        continue-on-error: true
+        run: |
+          $copy = Join-Path $env:RUNNER_TEMP 'momotombo-nodll'
+          Remove-Item -Recurse -Force $copy -ErrorAction SilentlyContinue
+          Copy-Item -Recurse -Path apps/desktop/out/mp4/win32-x64 -Destination $copy
+          # Under its real name after the accepted terms above, or still pending; both are removed.
+          $dll = @('d3dcompiler_47.dll', 'd3dcompiler_47.dll.terms-pending') | ForEach-Object { Join-Path $copy $_ } | Where-Object { Test-Path $_ } | Select-Object -First 1
+          New-Item -ItemType Directory -Force -Path "$env:OUT\packaged-nodll" | Out-Null
+          if ($dll) {
+            $v = (Get-Item $dll).VersionInfo
+            [ordered]@{ removedCopy = [ordered]@{ name = (Split-Path $dll -Leaf); fileVersion = $v.FileVersion; productVersion = $v.ProductVersion; sha256 = (Get-FileHash $dll -Algorithm SHA256).Hash.ToLower() } } | ConvertTo-Json | Set-Content -Encoding UTF8 "$env:OUT\packaged-nodll\removed-dll.json"
+          }
+          Remove-Item (Join-Path $copy 'd3dcompiler_47.dll'), (Join-Path $copy 'd3dcompiler_47.dll.terms-pending') -ErrorAction SilentlyContinue
+          $exe = Join-Path $copy 'Momotombo.exe'
+          $watch = Start-Process powershell.exe -PassThru -WindowStyle Hidden -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'tests/windows-terms/dll-watch.ps1', '-Exe', $exe, '-Out', "$env:OUT\packaged-nodll\dll-watch-smoke.json")
+          node apps/desktop/scripts/run-suite.mjs smoke --app $copy --out "$env:OUT\packaged-nodll" --timeout 25
+          $code = $LASTEXITCODE
+          $watch | Wait-Process -Timeout 30 -ErrorAction SilentlyContinue
+          exit $code
+
+      # The findings in the log and the job summary, so they survive a failed artifact upload.
+      - name: Summary
+        if: always()
+        continue-on-error: true
+        run: node tests/windows-env/ci-summary.mjs "$env:OUT"
+
+      - name: Upload results
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-test
+          path: out-ci
+          if-no-files-found: warn
+          retention-days: 3
+
+      - name: Verdict
+        if: always()
+        env:
+          OUTCOMES: >-
+            env=${{ steps.env.outcome }}
+            typecheck=${{ steps.typecheck.outcome }}
+            unit=${{ steps.unit.outcome }}
+            dev_ui=${{ steps.dev_ui.outcome }}
+            dev_terms=${{ steps.dev_terms.outcome }}
+            zig=${{ steps.zig.outcome }}
+            package=${{ steps.package.outcome }}
+            helper_probe=${{ steps.helper_probe.outcome }}
+            dev_nohelper=${{ steps.dev_nohelper.outcome }}
+            pkg_webm=${{ steps.pkg_webm.outcome }}
+            pkg_nodll=${{ steps.pkg_nodll.outcome }}
+            pkg_terms_es=${{ steps.pkg_terms_es.outcome }}
+            pkg_smoke=${{ steps.pkg_smoke.outcome }}
+            pkg_ui=${{ steps.pkg_ui.outcome }}
+            pkg_terms=${{ steps.pkg_terms.outcome }}
+        run: |
+          $failed = @()
+          foreach ($pair in ($env:OUTCOMES -split '\s+')) {
+            $name, $outcome = $pair -split '='
+            Write-Host ("{0,-10} {1}" -f $name, $(if ($outcome) { $outcome } else { '-' }))
+            if ($outcome -eq 'failure') { $failed += $name }
+          }
+          if ($failed.Count) { Write-Host "Failed: $($failed -join ', ')"; exit 1 }

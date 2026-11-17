@@ -1,0 +1,13 @@
+{
+  "name": "@momotombo/compositor",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@momotombo/timing": "workspace:*",
+    "@momotombo/project-model": "workspace:*"
+  }
+}
