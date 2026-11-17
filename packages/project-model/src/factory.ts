@@ -1,7 +1,7 @@
 import { FPS_30, secondsToTicks } from '@momotombo/timing';
 import { presetTransition } from './easing';
 import type {
-  Background, CameraLayout, ID, MagnifierStyle, Project, Recording, Segment, Style, Variant,
+  Background, CameraLayout, ID, MagnifierStyle, PrivacyItem, Project, Recording, Segment, Style, Variant,
 } from './types';
 import { SCHEMA_VERSION } from './types';
 
@@ -134,4 +134,8 @@ export function addRecording(project: Project, recording: Recording): Project {
 }
 
 export const DEFAULT_PRIVACY_DURATION = secondsToTicks(3);
+
+export function defaultPrivacyLook(): Pick<PrivacyItem, 'keyframes' | 'effect' | 'cornerRadius' | 'padFrames'> {
+  return { keyframes: [], effect: { kind: 'frosted' }, cornerRadius: 0.12, padFrames: 2 };
+}
 export const DEFAULT_MAGNIFIER_DURATION = secondsToTicks(3);

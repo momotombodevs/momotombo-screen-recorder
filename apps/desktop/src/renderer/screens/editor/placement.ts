@@ -1,5 +1,5 @@
 import {
-  DEFAULT_MAGNIFIER_DURATION, laneRange, layoutSegments, newCameraMoveLayout, placeItem, presetTransition, timelineToSource, type ID, type NewCameraLayout, type NewMagnifier, type NewPrivacy, type NewZoom, type TrackKey,
+  DEFAULT_MAGNIFIER_DURATION, defaultPrivacyLook, laneRange, layoutSegments, newCameraMoveLayout, placeItem, presetTransition, timelineToSource, type ID, type NewCameraLayout, type NewMagnifier, type NewPrivacy, type NewZoom, type TrackKey,
 } from '@momotombo/project-model';
 import type { Ticks } from '@momotombo/timing';
 import type { EditorStore, SelectionKind } from '../../state/editor-store';
@@ -41,7 +41,7 @@ export function placeRange(store: EditorStore, key: TrackKey, r: { recordingId: 
   const p = store.project;
   if (key === 'privacy') {
     return place(store, 'privacy', {
-      ...r, origin: 'manual', region: DEFAULT_PRIVACY_REGION, keyframes: [], effect: { kind: 'frosted' }, cornerRadius: 0.12, padFrames: 2,
+      ...r, origin: 'manual', region: DEFAULT_PRIVACY_REGION, ...defaultPrivacyLook(),
     });
   }
   if (key === 'cameraLayouts') {
