@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { watch, type FSWatcher } from 'node:fs';
+import { unwatchFile, watchFile } from 'node:fs';
 import { copyFile, mkdir, readFile, readdir, stat } from 'node:fs/promises';
 import { basename, dirname, extname, join } from 'node:path';
 import {
@@ -12,6 +12,7 @@ import { readProjectText, validatedProjectText, writeProjectTextKeepingBackup } 
 import { tm } from './settings';
 
 const EXTERNAL_EDIT_SETTLE_MS = 80;
+const EXTERNAL_EDIT_POLL_MS = 250;
 const KNOWN_TEXTS_KEPT = 16;
 const PEAKS_MAGIC = 'MPK1';
 const PEAKS_HEADER = 20;
@@ -223,29 +224,23 @@ export class ProjectStore {
   async watchExternalEdits(id: string, onEdit: (project: Project) => void): Promise<void> {
     this.stopWatching();
     const dir = this.dirOf(id);
+    const file = join(dir, PROJECT_FILE);
     let settle: ReturnType<typeof setTimeout> | undefined;
-    let watcher: FSWatcher;
-    try {
-      watcher = watch(dir, (_event, name) => {
-        if (name !== PROJECT_FILE) return;
-        clearTimeout(settle);
-        settle = setTimeout(() => void this.serialized(id, () => this.deliverExternalEdit(id)), EXTERNAL_EDIT_SETTLE_MS);
-      });
-    } catch (e) {
-      process.stderr.write(`Cannot watch ${dir} for outside edits: ${String(e)}\n`);
-      return;
-    }
+    const changed = () => {
+      clearTimeout(settle);
+      settle = setTimeout(() => void this.serialized(id, () => this.deliverExternalEdit(id)), EXTERNAL_EDIT_SETTLE_MS);
+    };
     const w: ExternalEditWatch = {
       onEdit,
       knownTexts: [await readProjectText(dir).catch(() => '')],
       stop: () => {
         clearTimeout(settle);
-        watcher.close();
+        unwatchFile(file, changed);
         if (this.watches.get(id) === w) this.watches.delete(id);
       },
     };
-    watcher.on('error', w.stop);
     this.watches.set(id, w);
+    watchFile(file, { interval: EXTERNAL_EDIT_POLL_MS, persistent: false }, changed);
   }
 
   stopWatching(): void {
