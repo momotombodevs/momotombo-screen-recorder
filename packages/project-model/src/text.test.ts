@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { secondsToTicks as sec } from '@momotombo/timing';
 import {
-  History, TEXT_ANIMATION_KINDS, TEXT_PRESETS, TEXT_PRESET_IDS, addRecording, addText, conflictsFor, createProject, evaluate, laneRange,
-  parseProject, placeItem, removeText, removeTimelineRange, resolveOverlaps, serializeProject, textAnimationAt, updateText,
+  History, TEXT_ANIMATION_KINDS, graphemes, TEXT_PRESETS, TEXT_PRESET_IDS, addRecording, addText, conflictsFor, createProject, evaluate, laneRange,
+  applyTextPreset, freeTextPosition, parseProject, placeItem, removeText, updateTextLook, removeTimelineRange, resolveOverlaps, serializeProject, textAnimationAt, updateText,
   type NewText, type Project, type Recording, type TextAnimationKind,
 } from './index';
 
@@ -73,7 +73,7 @@ describe('text animation', () => {
 
   it('is settled between the enter and the exit, for every kind', () => {
     for (const kind of TEXT_ANIMATION_KINDS) {
-      expect(textAnimationAt(item(kind, kind), sec(4))).toEqual({ opacity: 1, offsetEm: { x: 0, y: 0 }, scale: 1, visibleChars: 10 });
+      expect(textAnimationAt(item(kind, kind), sec(4))).toEqual({ opacity: 1, offsetEm: { x: 0, y: 0 }, scale: 1, visibleGraphemes: 10 });
     }
   });
 
@@ -106,15 +106,24 @@ describe('text animation', () => {
   });
 
   it('types the text in one character at a time and deletes it on exit', () => {
-    expect(textAnimationAt(item('typewriter'), sec(2))!.visibleChars).toBe(0);
-    expect(textAnimationAt(item('typewriter'), sec(2.25))!.visibleChars).toBe(5);
-    expect(textAnimationAt(item('typewriter'), sec(2.5))!.visibleChars).toBe(10);
+    expect(textAnimationAt(item('typewriter'), sec(2))!.visibleGraphemes).toBe(0);
+    expect(textAnimationAt(item('typewriter'), sec(2.25))!.visibleGraphemes).toBe(5);
+    expect(textAnimationAt(item('typewriter'), sec(2.5))!.visibleGraphemes).toBe(10);
     expect(textAnimationAt(item('typewriter'), sec(2))!.opacity).toBe(1);
-    expect(textAnimationAt(item('none', 'typewriter'), sec(5.75))!.visibleChars).toBe(5);
+    expect(textAnimationAt(item('none', 'typewriter'), sec(5.75))!.visibleGraphemes).toBe(5);
   });
 
-  it('counts emoji and accents as single characters', () => {
-    expect(textAnimationAt({ ...item('typewriter'), text: 'añ👋' }, sec(4))!.visibleChars).toBe(3);
+  it.each([
+    ['a precomposed accent and a single emoji', 'añ👋', 3],
+    ['a family emoji joined with zero-width joiners', 'a👨‍👩‍👧b', 3],
+    ['a flag made of two regional indicators', '🇳🇮!', 2],
+    ['an e followed by a combining accent', 'cafe\u0301', 4],
+  ])('counts %s as whole characters', (_, text, count) => {
+    expect(textAnimationAt({ ...item('typewriter'), text }, sec(4))!.visibleGraphemes).toBe(count);
+  });
+
+  it('splits text into the characters people see', () => {
+    expect(graphemes('a👨‍👩‍👧🇳🇮e\u0301')).toEqual(['a', '👨‍👩‍👧', '🇳🇮', 'e\u0301']);
   });
 
   it('shortens enter and exit together when the range is too short for both', () => {
@@ -184,6 +193,31 @@ describe('text placement and commands', () => {
     expect(conflictsFor(second.project, 'texts', second.project.texts[0]!)).toEqual([]);
     expect(laneRange(second.project, 'texts', sec(4), sec(7))).toEqual({ recordingId: 'r1', start: sec(4), end: sec(7) });
     expect(resolveOverlaps(second.project)).toBe(second.project);
+  });
+
+  it('applies a preset look but keeps the words, timing and place on the canvas', () => {
+    const p = withText({ text: 'Mine', position: { x: 0.3, y: 0.4 }, background: { color: '#123456', opacity: 1, padding: 0.3, radius: 0.1 } });
+    const [before] = p.texts;
+    const [after] = applyTextPreset(p, before!.id, 'title').texts;
+    expect(after).toMatchObject({ text: 'Mine', start: before!.start, end: before!.end, position: { x: 0.3, y: 0.4 }, fontWeight: 800, shadow: TEXT_PRESETS.title.shadow });
+    expect(after).not.toHaveProperty('background');
+  });
+
+  it('merges a partial background onto the current one and removes one given null', () => {
+    const p = withText({ background: { color: '#123456', opacity: 1, padding: 0.3, radius: 0.1 } });
+    const id = p.texts[0]!.id;
+    expect(updateTextLook(p, id, { background: { opacity: 0.5 }, color: '#00FF00' }).texts[0]).toMatchObject({
+      color: '#00FF00', background: { color: '#123456', opacity: 0.5, padding: 0.3, radius: 0.1 },
+    });
+    expect(updateTextLook(p, id, { background: null }).texts[0]).not.toHaveProperty('background');
+  });
+
+  it('puts a new text below one already on the same spot at the same time', () => {
+    const p = withText({ position: { x: 0.5, y: 0.5 } }, 2, 6);
+    const r = { recordingId: 'r1', start: sec(3), end: sec(5) };
+    expect(freeTextPosition(p.texts, r, { x: 0.5, y: 0.5 })).toEqual({ x: 0.5, y: 0.58 });
+    expect(freeTextPosition(p.texts, r, { x: 0.2, y: 0.5 })).toEqual({ x: 0.2, y: 0.5 });
+    expect(freeTextPosition(p.texts, { ...r, start: sec(6), end: sec(8) }, { x: 0.5, y: 0.5 })).toEqual({ x: 0.5, y: 0.5 });
   });
 
   it('adds, updates and removes, and undo brings each step back', () => {
