@@ -242,6 +242,14 @@ describe('style and audio patches', () => {
     expect(apply([{ op: 'setAudio', patch: { mic: { gain: 0.5 }, system: { muted: true } } }]).audio).toEqual({ mic: { gain: 0.5, muted: false }, system: { gain: 0.8, muted: true } });
   });
 
+  it('sets a number on an audio field whose default is null', () => {
+    const p = sixtySeconds();
+    const withNullable = { ...p, audio: { ...p.audio, mic: { ...p.audio.mic, normalize: { measuredLufs: null } } } } as Project;
+    const after = apply([{ op: 'setAudio', patch: { mic: { normalize: { measuredLufs: -18 } } } }], withNullable);
+    expect(after.audio.mic).toMatchObject({ normalize: { measuredLufs: -18 } });
+    expect(() => run([{ op: 'setAudio', patch: { mic: { normalize: { measuredLufs: -18, mesured: 1 } } } }], withNullable)).toThrow(/unknown field audio\.mic\.normalize\.mesured/);
+  });
+
   it('refuses an audio patch with a misspelled field', () => {
     expect(() => run([{ op: 'setAudio', patch: { mic: { gian: 0.5 } } }])).toThrow(/^op 0 \(setAudio\): unknown field audio\.mic\.gian/);
   });
