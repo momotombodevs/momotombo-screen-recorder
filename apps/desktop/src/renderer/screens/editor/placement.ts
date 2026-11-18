@@ -1,5 +1,5 @@
 import {
-  DEFAULT_MAGNIFIER_DURATION, DEFAULT_TEXT_DURATION, TEXT_PRESETS, defaultPrivacyLook, laneRange, layoutSegments, newCameraMoveLayout, placeItem,
+  DEFAULT_MAGNIFIER_DURATION, DEFAULT_TEXT_DURATION, TEXT_PRESETS, defaultPrivacyLook, freeTextPosition, laneRange, layoutSegments, newCameraMoveLayout, placeItem,
   presetTransition, timelineToSource, type ID, type NewByKey, type TextPresetId, type TrackKey, type Vec2,
 } from '@momotombo/project-model';
 import type { Ticks } from '@momotombo/timing';
@@ -80,5 +80,5 @@ export function newText(r: { recordingId: ID; start: Ticks; end: Ticks }, preset
 export function addTextAt(store: EditorStore, at: Ticks, position?: Vec2): boolean {
   const r = laneRange(store.project, 'texts', at, at + DEFAULT_TEXT_DURATION);
   if (!r) { store.notify(t("Aquí no hay espacio para un nuevo texto.")); return false; }
-  return place(store, 'texts', newText(r, 'title', position));
+  return place(store, 'texts', newText(r, 'title', freeTextPosition(store.project.texts, r, position ?? TEXT_PRESETS.title.position)));
 }

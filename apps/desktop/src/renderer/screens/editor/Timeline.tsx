@@ -22,7 +22,7 @@ type ItemKind = 'zoom' | 'privacy' | 'camera' | 'magnifier' | 'text';
 type DrawLane = ItemKind;
 const LANE_KEY: Record<DrawLane, TrackKey> = { zoom: 'zooms', camera: 'cameraLayouts', privacy: 'privacy', magnifier: 'magnifiers', text: 'texts' };
 const TRACK = LANE_KEY;
-const isItemKind = (k: string): k is ItemKind => k in TRACK;
+const isItemKind = (k: string): k is ItemKind => Object.hasOwn(TRACK, k);
 /** Fade drawn at both ends of a magnifier range (the lens fades in and out). */
 const MAGNIFIER_RAMP = secondsToTicks(0.25);
 
@@ -366,7 +366,12 @@ export function Timeline({ store, player }: { store: EditorStore; player: Player
         className={`tl-item tl-${kind}${selected ? ' is-selected' : ''}${it.auto ? ' is-auto' : ''}`}
         style={{ left, width: w, top: 3 + layout.laneOf[i]! * laneHeight, height: laneHeight - 6, ['--ramp-in' as string]: `${rampIn}px`, ['--ramp-out' as string]: `${rampOut}px` }}
         onPointerDown={(e) => press(e, { kind, id: it.id, mode: 'move', start0: it.start, end0: it.end })}
-        onFocus={() => store.select({ kind, id: it.id })}
+        onKeyDown={(e) => {
+          if (e.key !== 'Enter' && e.key !== ' ') return;
+          e.preventDefault();
+          e.stopPropagation();
+          store.select({ kind, id: it.id });
+        }}
         role="button"
         tabIndex={0}
         aria-label={it.label}
@@ -399,7 +404,7 @@ export function Timeline({ store, player }: { store: EditorStore; player: Player
     ...m, label: `${m.zoom.toFixed(1)}× · ${Math.round(m.size)} px`, ramp: [MAGNIFIER_RAMP, MAGNIFIER_RAMP] as [number, number],
   })));
   const textLayout = blockLayout(project.texts.map((it) => ({
-    ...it, label: it.text.split('\n')[0]!,
+    ...it, label: it.text.split('\n').find((l) => l.trim()) ?? t("Texto"),
     ramp: [it.enter.kind === 'none' ? 0 : it.enter.duration, it.exit.kind === 'none' ? 0 : it.exit.duration] as [number, number],
   })));
   const privacyLayout = blockLayout(project.privacy.map((p) => ({
