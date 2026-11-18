@@ -173,7 +173,7 @@ Momotombo is built on Electron (Chromium) and a few JavaScript packages, each un
 
 <details><summary><b>Building from source</b></summary>
 
-Requirements: macOS (Apple silicon); Node.js 22.12+ (see `.nvmrc`; `nvm use` in the repository root); pnpm at the version in `packageManager` in `package.json`; Xcode Command Line Tools (`xcode-select --install`) — packaging, the native helpers and the audit tools call `swiftc`, `clang`, `codesign`, `lipo`, `otool`, `objdump`, `ditto`, `hdiutil` and `PlistBuddy`, and `pnpm start` signs the development bundle with `codesign`.
+Requirements: macOS (Apple silicon); Node.js 22.12+ (see `.nvmrc`; `nvm use` in the repository root); pnpm at the version in `packageManager` in `package.json` (through Corepack, `corepack enable`, this needs the Corepack bundled with Node 22.22.2 or later, or Corepack 0.34.5+: older ones cannot start pnpm 11 and later); Xcode Command Line Tools (`xcode-select --install`) — packaging, the native helpers and the audit tools call `swiftc`, `clang`, `codesign`, `lipo`, `otool`, `objdump`, `ditto`, `hdiutil` and `PlistBuddy`, and `pnpm start` signs the development bundle with `codesign`.
 
 ```bash
 nvm use                       # Node version from .nvmrc
