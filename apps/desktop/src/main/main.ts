@@ -202,6 +202,8 @@ function registerIpc(): void {
   });
   handle('projects:reveal', ({ id }) => shell.showItemInFolder(join(store.dirOf(id), 'project.json')));
   handle('projects:readText', async ({ id, path }) => readFile(store.resolve(id, path), 'utf8'));
+  handle('projects:readPeaks', ({ id, file }) => store.readPeaks(id, file));
+  handle('projects:writePeaks', ({ id, file, stamp, data }) => store.writePeaks(id, file, stamp, data));
   handle('projects:setThumbnail', async ({ id, dataUrl }) => {
     await store.setThumbnail(id, Buffer.from(dataUrl.slice(dataUrl.indexOf(',') + 1), 'base64'));
   });

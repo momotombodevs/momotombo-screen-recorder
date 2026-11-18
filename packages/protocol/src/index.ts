@@ -307,6 +307,13 @@ export const Schemas = {
   'projects:trash': z.object({ id: ProjectId }),
   'projects:reveal': z.object({ id: ProjectId }),
   'projects:readText': z.object({ id: ProjectId, path: RelPath }),
+  'projects:readPeaks': z.object({ id: ProjectId, file: RelPath.refine((p) => p.startsWith('media/')) }),
+  'projects:writePeaks': z.object({
+    id: ProjectId,
+    file: RelPath.refine((p) => p.startsWith('media/')),
+    stamp: z.object({ size: z.number().int().min(0), mtimeMs: z.number().min(0) }),
+    data: z.instanceof(Uint8Array).refine((d) => d.byteLength <= 32 * 1024 * 1024),
+  }),
   'projects:setThumbnail': z.object({ id: ProjectId, dataUrl: z.string().startsWith('data:image/jpeg;base64,').max(2_000_000) }),
   'capture:start': CaptureConfig,
   'capture:diskEstimate': CaptureConfig,

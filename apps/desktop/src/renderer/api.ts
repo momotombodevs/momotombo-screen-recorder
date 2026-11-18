@@ -16,6 +16,8 @@ declare global {
   }
 }
 
+export interface PeaksStamp { size: number; mtimeMs: number }
+
 const bridge = (): Bridge => window.momotombo;
 /** Electron wraps errors from the main process ("Error invoking remote method 'x': Error: …"); keep only the message. */
 const cleanError = (e: unknown): Error => new Error(String((e as Error)?.message ?? e).replace(/^Error invoking remote method '[^']*': (?:\w*Error: )?/, ''));
@@ -34,6 +36,8 @@ export const api = {
   trashProject: (id: string) => call<void>('projects:trash', { id }),
   revealProject: (id: string) => call<void>('projects:reveal', { id }),
   readProjectText: (id: string, path: string) => call<string>('projects:readText', { id, path }),
+  readPeaks: (id: string, file: string) => call<{ stamp: PeaksStamp; data: Uint8Array | null }>('projects:readPeaks', { id, file }),
+  writePeaks: (id: string, file: string, stamp: PeaksStamp, data: Uint8Array) => call<boolean>('projects:writePeaks', { id, file, stamp, data }),
   setThumbnail: (id: string, dataUrl: string) => call<void>('projects:setThumbnail', { id, dataUrl }),
   onProjectChanged: (fn: (change: { id: string; json: unknown }) => void) => bridge().on('projects:changed', (d) => fn(d as { id: string; json: unknown })),
   closeProject: () => call<void>('projects:close'),

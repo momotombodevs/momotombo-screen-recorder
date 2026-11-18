@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { serializeProject, type Recording } from '@momotombo/project-model';
@@ -245,5 +245,51 @@ describe('ProjectStore: edits made outside the app', () => {
     await settled();
     expect(seen).toEqual([]);
     store.stopWatching();
+  });
+});
+
+describe('ProjectStore: waveform peaks cache', () => {
+  async function withMedia() {
+    const { store, created } = await storeWith(1);
+    const { id, dir } = created[0]!;
+    await mkdir(join(dir, 'media', 'r1'), { recursive: true });
+    await writeFile(join(dir, 'media', 'r1', 'mic.m4a'), 'first take');
+    return { store, id, dir, file: 'media/r1/mic.m4a' };
+  }
+
+  it('returns no peaks until written, then the written peaks, stored under cache/', async () => {
+    const { store, id, dir, file } = await withMedia();
+    const first = await store.readPeaks(id, file);
+    expect(first.data).toBeNull();
+    expect(await store.writePeaks(id, file, first.stamp, new Uint8Array([1, 2, 3]))).toBe(true);
+    expect([...(await store.readPeaks(id, file)).data!]).toEqual([1, 2, 3]);
+    expect((await readdir(join(dir, 'cache'))).some((f) => f.startsWith('peaks-'))).toBe(true);
+    expect(await readdir(join(dir, 'media', 'r1'))).toEqual(['mic.m4a']);
+  });
+
+  it('forgets the peaks once the source file changes size or modification time', async () => {
+    const { store, id, dir, file } = await withMedia();
+    await store.writePeaks(id, file, (await store.readPeaks(id, file)).stamp, new Uint8Array([9]));
+    await writeFile(join(dir, file), 'a longer second take');
+    expect((await store.readPeaks(id, file)).data).toBeNull();
+
+    await store.writePeaks(id, file, (await store.readPeaks(id, file)).stamp, new Uint8Array([7]));
+    const later = new Date(Date.now() + 60_000);
+    await utimes(join(dir, file), later, later);
+    expect((await store.readPeaks(id, file)).data).toBeNull();
+  });
+
+  it('refuses peaks computed from an older version of the file', async () => {
+    const { store, id, dir, file } = await withMedia();
+    const stale = (await store.readPeaks(id, file)).stamp;
+    await writeFile(join(dir, file), 'replaced while decoding');
+    expect(await store.writePeaks(id, file, stale, new Uint8Array([5]))).toBe(false);
+    expect((await store.readPeaks(id, file)).data).toBeNull();
+  });
+
+  it('only reads peaks for files under media/', async () => {
+    const { store, id } = await withMedia();
+    await expect(store.readPeaks(id, 'project.json')).rejects.toThrow();
+    await expect(store.writePeaks(id, 'cache/x.bin', { size: 0, mtimeMs: 0 }, new Uint8Array(1))).rejects.toThrow();
   });
 });

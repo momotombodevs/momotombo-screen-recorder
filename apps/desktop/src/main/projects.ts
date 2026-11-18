@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { watch, type FSWatcher } from 'node:fs';
 import { copyFile, mkdir, readFile, readdir, stat } from 'node:fs/promises';
 import { basename, dirname, extname, join } from 'node:path';
@@ -13,6 +13,10 @@ import { tm } from './settings';
 
 const EXTERNAL_EDIT_SETTLE_MS = 80;
 const KNOWN_TEXTS_KEPT = 16;
+const PEAKS_MAGIC = 'MPK1';
+const PEAKS_HEADER = 20;
+
+export interface PeaksStamp { size: number; mtimeMs: number }
 
 interface ExternalEditWatch {
   onEdit: (project: Project) => void;
@@ -284,6 +288,35 @@ export class ProjectStore {
 
   async setThumbnail(id: string, jpeg: Uint8Array): Promise<void> {
     await writeFileAtomic(join(this.dirOf(id), 'cache', 'thumbnail.jpg'), jpeg);
+  }
+
+  async readPeaks(id: string, file: string): Promise<{ stamp: PeaksStamp; data: Uint8Array | null }> {
+    const { source, cache } = this.peaksPaths(id, file);
+    const info = await stat(source);
+    const stamp = { size: info.size, mtimeMs: info.mtimeMs };
+    const bytes = await readFile(cache).catch(() => null);
+    if (!bytes || bytes.length < PEAKS_HEADER || bytes.toString('latin1', 0, 4) !== PEAKS_MAGIC) return { stamp, data: null };
+    const same = bytes.readDoubleLE(4) === stamp.size && bytes.readDoubleLE(12) === stamp.mtimeMs;
+    return { stamp, data: same ? bytes.subarray(PEAKS_HEADER) : null };
+  }
+
+  async writePeaks(id: string, file: string, stamp: PeaksStamp, data: Uint8Array): Promise<boolean> {
+    const { source, cache } = this.peaksPaths(id, file);
+    const info = await stat(source);
+    if (info.size !== stamp.size || info.mtimeMs !== stamp.mtimeMs) return false;
+    const header = Buffer.alloc(PEAKS_HEADER);
+    header.write(PEAKS_MAGIC, 0, 'latin1');
+    header.writeDoubleLE(stamp.size, 4);
+    header.writeDoubleLE(stamp.mtimeMs, 12);
+    await mkdir(dirname(cache), { recursive: true });
+    await writeFileAtomic(cache, Buffer.concat([header, data]));
+    return true;
+  }
+
+  private peaksPaths(id: string, file: string): { source: string; cache: string } {
+    if (!file.startsWith('media/')) throw new Error('Invalid path');
+    const name = `peaks-${createHash('sha256').update(file).digest('hex').slice(0, 20)}.bin`;
+    return { source: this.resolve(id, file), cache: join(this.dirOf(id), 'cache', name) };
   }
 
   forget(id: string): void {

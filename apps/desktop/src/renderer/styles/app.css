@@ -2074,9 +2074,28 @@ h3 {
 
 .tl-marker {
   position: absolute;
-  top: 15px;
+  top: 13px;
+  display: grid;
+  place-items: center;
+  width: 17px;
+  height: 17px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
   color: var(--accent);
-  transform: translateX(-2px);
+  transform: translateX(-8px);
+  cursor: pointer;
+  z-index: 2;
+}
+
+.tl-marker:hover {
+  background: rgba(var(--accent-rgb), 0.18);
+}
+
+.tl-marker:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 .tl-row {
@@ -2203,11 +2222,10 @@ h3 {
 }
 
 .tl-wave {
-  position: absolute;
-  inset: 6px 4px;
-  background: repeating-linear-gradient(90deg, rgba(var(--track-audio-rgb), 0.55) 0 1px, transparent 1px 3px);
-  mask: linear-gradient(transparent, #000 30%, #000 70%, transparent);
-  opacity: 0.6;
+  position: sticky;
+  left: 140px;
+  display: block;
+  pointer-events: none;
 }
 
 .tl-playhead {
@@ -2772,10 +2790,6 @@ body {
 .tl-seg-system {
   background: rgba(var(--track-audio-rgb), 0.14);
   border-color: rgba(var(--track-audio-rgb), 0.36);
-}
-
-.tl-wave {
-  background: repeating-linear-gradient(90deg, rgba(var(--track-audio-rgb), 0.6) 0 1px, transparent 1px 3px);
 }
 
 .tl-item.is-selected,
