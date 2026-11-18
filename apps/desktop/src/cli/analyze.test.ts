@@ -1,19 +1,23 @@
+import { execFileSync, spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { mkdtemp, mkdir, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readdir, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { addRecording, createProject, removeTimelineRange, type Project, type Recording } from '@momotombo/project-model';
+import { join, relative } from 'node:path';
+import { addRecording, createProject, removeTimelineRange, serializeProject, type Project, type Recording } from '@momotombo/project-model';
 import { secondsToTicks } from '@momotombo/timing';
 import { describe, expect, it } from 'vitest';
 import {
-  ToolsMissingError, analyzeProject, cursorActivity, findingsFor, micGainSuggestion, parseAudioLog, parseProbe, parseVideoLog,
-  suggestCuts, verdictFor, type Finding, type RecordingAnalysis, type Run,
+  ToolError, ToolsMissingError, analyzeProject, audioStats, cursorActivity, deadTimeRanges, findingsFor, micLevelSuggestion, parseAudioLog,
+  parseLoudnessLog, parseProbe, parseSilenceLog, parseVideoLog, silenceThresholdDb, suggestCuts, toolRunner, verdictFor,
+  type AudioStats, type Finding, type RecordingAnalysis, type Run,
 } from './analyze';
+import { EXIT, run as cli } from './momotombo-edit';
 import { applyOps, parseOps } from './ops';
 
 const fixture = (name: string) => readFileSync(join(__dirname, 'fixtures', 'analyze', name), 'utf8');
+const hasFfmpeg = spawnSync('ffmpeg', ['-version']).status === 0 && spawnSync('ffprobe', ['-version']).status === 0;
 
-const recording = (seconds: number, sources: Recording['sources'] = {}, cursorFile?: string): Recording => ({
+const recording = (seconds: number, sources: Recording['sources'] = {}, cursorFile?: string, extra: Partial<Recording> = {}): Recording => ({
   id: 'r1',
   createdAt: '2026-11-17T00:00:00Z',
   duration: secondsToTicks(seconds),
@@ -26,6 +30,7 @@ const recording = (seconds: number, sources: Recording['sources'] = {}, cursorFi
   },
   syncOffsets: {},
   markers: [],
+  ...extra,
 });
 
 const source = (kind: 'screen' | 'camera' | 'mic' | 'system', seconds: number, startOffset = 0) => ({
@@ -33,13 +38,16 @@ const source = (kind: 'screen' | 'camera' | 'mic' | 'system', seconds: number, s
   mime: 'video/mp4', startOffset: secondsToTicks(startOffset), duration: secondsToTicks(seconds),
 });
 
-const cleanAudio = { integratedLufs: -18, loudnessRangeLu: 6, truePeakDbtp: -3, samplePeakDbfs: -3.5, noiseFloorDb: -60, clipping: false, silenceShare: 0.1, silences: [] };
+const cleanAudio: AudioStats = {
+  integratedLufs: -18, loudnessRangeLu: 6, truePeakDbtp: -3, samplePeakDbfs: -3.5, noiseFloorDb: -65, clipping: false, silenceThresholdDb: -36, silenceShare: 0.1, silences: [],
+};
 const goodScreen = { file: 'media/r1/screen.mp4', codec: 'h264', width: 1920, height: 1080, frameRate: 60, nominalFrameRate: 60, bitrateKbps: 8000, durationSeconds: 60, sampleRate: null, channels: null };
 
 const healthy = (): RecordingAnalysis => ({
   id: 'r1',
   durationSeconds: 60,
   missing: [],
+  problems: [],
   media: { screen: goodScreen, mic: { ...goodScreen, file: 'media/r1/mic.m4a', codec: 'opus', width: null, height: null, frameRate: null, nominalFrameRate: null, bitrateKbps: 128, sampleRate: 48000, channels: 1 } },
   durationMismatchSeconds: 0,
   audio: { mic: cleanAudio, system: null },
@@ -48,7 +56,9 @@ const healthy = (): RecordingAnalysis => ({
   deadTime: { ranges: [], totalSeconds: 0 },
 });
 
+const withMic = (mic: Partial<AudioStats>): RecordingAnalysis => ({ ...healthy(), audio: { mic: { ...cleanAudio, ...mic }, system: null } });
 const codes = (findings: Finding[]) => findings.map((f) => `${f.severity}:${f.code}`);
+const shortTake = (): Project => addRecording(createProject('Demo'), recording(10, { screen: source('screen', 10) }));
 
 describe('parseProbe', () => {
   it('reads codec, size, real and nominal frame rate, bitrate and duration of a video', () => {
@@ -62,12 +72,10 @@ describe('parseProbe', () => {
   });
 });
 
-describe('parseAudioLog', () => {
+describe('audio parsing', () => {
   it('reads loudness, peaks, noise floor and silences of a quiet mic', () => {
-    const stats = parseAudioLog(fixture('ffmpeg-mic-quiet.txt'), 19.468);
-    expect(stats).toMatchObject({ integratedLufs: -53.9, loudnessRangeLu: 1.6, truePeakDbtp: -33.3, samplePeakDbfs: -33.295, noiseFloorDb: -50.798, clipping: false });
-    expect(stats.silences).toEqual([{ start: 0, end: 6.917 }, { start: 6.926, end: 9.156 }, { start: 9.156, end: 19.468 }]);
-    expect(stats.silenceShare).toBeGreaterThan(0.99);
+    expect(parseLoudnessLog(fixture('ffmpeg-mic-quiet.txt'))).toEqual({ integratedLufs: -53.9, loudnessRangeLu: 1.6, truePeakDbtp: -33.3, samplePeakDbfs: -33.295, noiseFloorDb: -50.798 });
+    expect(parseSilenceLog(fixture('ffmpeg-mic-quiet.txt'), 19.468)).toEqual([{ start: 0, end: 6.917 }, { start: 6.926, end: 9.156 }, { start: 9.156, end: 19.468 }]);
   });
 
   it('reports digital silence as no peak and no noise floor', () => {
@@ -81,7 +89,28 @@ describe('parseAudioLog', () => {
   });
 
   it('closes a silence still open at the end of the file', () => {
-    expect(parseAudioLog('silence_start: 4.5\n', 10).silences).toEqual([{ start: 4.5, end: 10 }]);
+    expect(parseSilenceLog('silence_start: 4.5\n', 10)).toEqual([{ start: 4.5, end: 10 }]);
+  });
+
+  it('measures the silence share against the given threshold', () => {
+    expect(audioStats(parseLoudnessLog(''), -50, [{ start: 0, end: 5 }], 10)).toMatchObject({ silenceThresholdDb: -50, silenceShare: 0.5 });
+  });
+});
+
+describe('silenceThresholdDb', () => {
+  const level = (integratedLufs: number | null, noiseFloorDb: number | null) => ({ integratedLufs, noiseFloorDb, loudnessRangeLu: null, truePeakDbtp: null, samplePeakDbfs: null });
+
+  it('follows a quiet voice instead of the absolute -35 dB', () => {
+    expect(silenceThresholdDb(level(-38, -75))).toBe(-56);
+  });
+
+  it('never calls anything louder than the room noise silence', () => {
+    expect(silenceThresholdDb(level(-53.9, -50.8))).toBe(-40.8);
+  });
+
+  it('caps the threshold for loud voices and falls back for digital silence', () => {
+    expect(silenceThresholdDb(level(-10, -60))).toBe(-35);
+    expect(silenceThresholdDb(level(-70, null))).toBe(-35);
   });
 });
 
@@ -115,6 +144,10 @@ describe('cursorActivity', () => {
     ].map((e) => JSON.stringify(e)).join('\n');
     expect(cursorActivity(log, 20)).toEqual({ clickCount: 1, idle: [{ start: 2.1, end: 9 }, { start: 10, end: 20 }], idleSeconds: 16.9 });
   });
+
+  it('rejects a log with content but no usable events', () => {
+    expect(() => cursorActivity('not json\n{"e":"m"}\n', 20)).toThrow(/no valid cursor events/);
+  });
 });
 
 describe('findingsFor', () => {
@@ -122,43 +155,95 @@ describe('findingsFor', () => {
     expect(findingsFor(healthy())).toEqual([]);
   });
 
-  it('blocks a take without a mic or with a silent mic', () => {
-    expect(codes(findingsFor({ ...healthy(), missing: ['mic'], audio: { mic: null, system: null } }))).toContain('blocker:MIC_MISSING');
-    expect(codes(findingsFor({ ...healthy(), audio: { mic: { ...cleanAudio, silenceShare: 0.99, integratedLufs: -70 }, system: null } }))).toEqual(['blocker:MIC_SILENT']);
+  it('warns, without blocking, about a take with no mic or no screen', () => {
+    expect(codes(findingsFor({ ...healthy(), missing: ['mic'], audio: { mic: null, system: null } }))).toEqual(['warning:MIC_MISSING']);
+    expect(codes(findingsFor({ ...healthy(), missing: ['screen'], media: {}, video: { screen: null, camera: null } }))).toEqual(['warning:SCREEN_MISSING']);
   });
 
-  it('warns about a quiet mic and blocks one too quiet to rescue', () => {
-    const at = (integratedLufs: number) => codes(findingsFor({ ...healthy(), audio: { mic: { ...cleanAudio, integratedLufs }, system: null } }));
-    expect(at(-34)).toEqual(['warning:MIC_TOO_QUIET']);
-    expect(at(-50)).toEqual(['blocker:MIC_TOO_QUIET']);
+  it('blocks a mic that only picked up room noise', () => {
+    expect(codes(findingsFor(withMic({ silenceShare: 0.99, integratedLufs: -60 })))).toEqual(['blocker:MIC_SILENT']);
+    expect(codes(findingsFor(withMic({ integratedLufs: -70 })))).toEqual(['blocker:MIC_SILENT']);
+  });
+
+  it('lets normalization rescue a quiet but clean mic', () => {
+    const found = findingsFor(withMic({ integratedLufs: -38, noiseFloorDb: -75, silenceShare: 0.4 }));
+    expect(codes(found)).toEqual(['warning:MIC_TOO_QUIET']);
+    expect(verdictFor(found).verdict).toBe('edit-with-fixes');
+  });
+
+  it('blocks a quiet mic whose boost would make the noise as loud as the voice', () => {
+    expect(codes(findingsFor(withMic({ integratedLufs: -53.9, noiseFloorDb: -50.8, silenceShare: 0.8 })))).toEqual(['blocker:MIC_TOO_QUIET']);
+  });
+
+  it('blocks a quiet mic that needs more boost than normalization gives', () => {
+    expect(codes(findingsFor(withMic({ integratedLufs: -50, noiseFloorDb: -100, silenceShare: 0.4 })))).toEqual(['blocker:MIC_TOO_QUIET']);
+  });
+
+  it('rates room noise against the voice level', () => {
+    expect(codes(findingsFor(withMic({ integratedLufs: -18, noiseFloorDb: -33 })))).toEqual(['blocker:MIC_NOISY']);
+    expect(codes(findingsFor(withMic({ integratedLufs: -18, noiseFloorDb: -43 })))).toEqual(['warning:MIC_NOISY']);
   });
 
   it('warns about clipping and blocks a mic that clips while running hot', () => {
-    const mic = { ...cleanAudio, truePeakDbtp: 0.4, samplePeakDbfs: 0, clipping: true };
-    expect(codes(findingsFor({ ...healthy(), audio: { mic, system: null } }))).toEqual(['warning:MIC_CLIPPING']);
-    expect(codes(findingsFor({ ...healthy(), audio: { mic: { ...mic, integratedLufs: -9 }, system: null } }))).toEqual(['blocker:MIC_CLIPPING']);
+    const clipping = { truePeakDbtp: 0.4, samplePeakDbfs: 0, clipping: true };
+    expect(codes(findingsFor(withMic(clipping)))).toEqual(['warning:MIC_CLIPPING']);
+    expect(codes(findingsFor(withMic({ ...clipping, integratedLufs: -9 })))).toEqual(['blocker:MIC_CLIPPING']);
   });
 
-  it('flags a noisy room, a dark camera, a small or slow screen and long dead time', () => {
+  it('reports a tool failure without ever asking for a re-record', () => {
+    const found = findingsFor({ ...healthy(), audio: { mic: null, system: null }, problems: [{ track: 'mic', problem: 'analysis-failed', file: 'media/r1/mic.m4a', error: 'ffmpeg failed: No such filter' }] });
+    expect(codes(found)).toEqual(['warning:ANALYSIS_FAILED']);
+    expect(verdictFor(found).verdict).not.toBe('re-record');
+  });
+
+  it('blocks a mic or screen file that cannot be decoded or is gone, and flags paths outside the project', () => {
+    const problem = (track: 'mic' | 'screen' | 'camera', kind: 'unreadable' | 'missing' | 'outside') => ({ track, problem: kind, file: 'x', error: 'e' });
+    expect(codes(findingsFor({ ...healthy(), problems: [problem('mic', 'unreadable'), problem('screen', 'missing'), problem('camera', 'outside')] })))
+      .toEqual(['blocker:MIC_UNREADABLE', 'blocker:SCREEN_FILE_MISSING', 'warning:CAMERA_FILE_OUTSIDE_PROJECT']);
+  });
+
+  it('notes an unusable cursor log', () => {
+    expect(codes(findingsFor({ ...healthy(), cursor: null, problems: [{ track: 'cursor', problem: 'unreadable', file: 'c', error: 'no valid cursor events' }] }))).toEqual(['info:CURSOR_UNREADABLE']);
+  });
+
+  it('flags a dark camera, a small or slow screen and long dead time', () => {
     const found = codes(findingsFor({
       ...healthy(),
       missing: ['system'],
       media: { ...healthy().media, screen: { ...goodScreen, width: 1280, height: 720, nominalFrameRate: 15 } },
-      audio: { mic: { ...cleanAudio, noiseFloorDb: -38 }, system: null },
       video: { screen: { black: [], frozen: [], meanBrightness: null }, camera: { black: [], frozen: [], meanBrightness: 40 } },
       deadTime: { ranges: [{ start: 10, end: 22, timeline: [{ start: 10, end: 22 }] }], totalSeconds: 12 },
     }));
     expect(found).toEqual(expect.arrayContaining([
-      'warning:MIC_NOISY', 'warning:CAMERA_DARK', 'warning:SCREEN_LOW_RESOLUTION', 'warning:SCREEN_LOW_FPS', 'warning:DEAD_TIME', 'info:SYSTEM_AUDIO_MISSING',
+      'warning:CAMERA_DARK', 'warning:SCREEN_LOW_RESOLUTION', 'warning:SCREEN_LOW_FPS', 'warning:DEAD_TIME', 'info:SYSTEM_AUDIO_MISSING',
     ]));
   });
 
   it('gives every finding evidence and a concrete tip', () => {
-    for (const f of findingsFor({ ...healthy(), missing: ['mic', 'camera', 'cursor'], audio: { mic: null, system: null } })) {
+    for (const f of findingsFor({ ...healthy(), missing: ['mic', 'camera', 'cursor', 'screen'], audio: { mic: null, system: null } })) {
       expect(f.message.length).toBeGreaterThan(10);
       expect(f.advice.length).toBeGreaterThan(10);
       expect(f.recordingId).toBe('r1');
     }
+  });
+});
+
+describe('deadTimeRanges', () => {
+  const base = { ...healthy(), audio: { mic: { ...cleanAudio, silences: [{ start: 0, end: 30 }] }, system: null }, cursor: { clickCount: 0, idle: [{ start: 5, end: 25 }], idleSeconds: 20 } };
+
+  it('is mic silence while the cursor is idle and the screen does not change', () => {
+    expect(deadTimeRanges({ ...base, video: { screen: { black: [], frozen: [{ start: 10, end: 40 }], meanBrightness: null }, camera: null } })).toEqual([{ start: 10, end: 25 }]);
+  });
+
+  it('keeps a playing video or a running build out of dead time', () => {
+    expect(deadTimeRanges({ ...base, video: { screen: { black: [], frozen: [], meanBrightness: null }, camera: null } })).toEqual([]);
+    const sound = { ...cleanAudio, silences: [{ start: 0, end: 12 }] };
+    expect(deadTimeRanges({ ...base, audio: { ...base.audio, system: sound }, video: { screen: null, camera: null } })).toEqual([{ start: 5, end: 12 }]);
+  });
+
+  it('cannot be measured without a cursor log or a mic', () => {
+    expect(deadTimeRanges({ ...base, cursor: null })).toBeNull();
+    expect(deadTimeRanges({ ...base, audio: { mic: null, system: null } })).toBeNull();
   });
 });
 
@@ -177,6 +262,7 @@ describe('verdictFor', () => {
 
 describe('suggestCuts', () => {
   const project = (): Project => addRecording(createProject('Demo'), recording(60, { screen: source('screen', 60) }));
+  const seconds = (p: Project) => p.sequence.segments.map((s) => [s.sourceStart, s.sourceEnd].map((t) => Math.round(t / secondsToTicks(0.01)) / 100));
 
   it('turns long dead time into padded timeline cuts, latest first, skipping short gaps', () => {
     const cuts = suggestCuts(project(), [{ start: 5, end: 10 }, { start: 20, end: 21 }, { start: 40, end: 50 }].map((r) => ({ ...r, recordingId: 'r1' })));
@@ -189,86 +275,206 @@ describe('suggestCuts', () => {
     expect(cuts).toEqual([{ op: 'cut', start: 32.25, end: 41.75 }, { op: 'cut', start: 0, end: 1.75 }]);
   });
 
+  it('cuts every place a source range shows on reordered and duplicated segments', () => {
+    const p = project();
+    const seg = (id: string, from: number, to: number) => ({ id, recordingId: 'r1', sourceStart: secondsToTicks(from), sourceEnd: secondsToTicks(to) });
+    const shuffled: Project = { ...p, sequence: { ...p.sequence, segments: [seg('a', 30, 60), seg('b', 0, 30), seg('c', 0, 30)] } };
+    const cuts = suggestCuts(shuffled, [{ start: 10, end: 15, recordingId: 'r1' }, { start: 40, end: 45, recordingId: 'r1' }]);
+    expect(cuts).toEqual([
+      { op: 'cut', start: 70.25, end: 74.75 },
+      { op: 'cut', start: 40.25, end: 44.75 },
+      { op: 'cut', start: 10.25, end: 14.75 },
+    ]);
+    expect(seconds(applyOps(shuffled, parseOps(cuts)).project)).toEqual([[30, 40.25], [44.75, 60], [0, 10.25], [14.75, 30], [0, 10.25], [14.75, 30]]);
+  });
+
   it('produces ops the CLI applies in order', () => {
     const cuts = suggestCuts(project(), [{ start: 5, end: 10, recordingId: 'r1' }, { start: 40, end: 50, recordingId: 'r1' }]);
-    const after = applyOps(project(), parseOps(cuts)).project;
-    expect(after.sequence.segments.map((s) => [s.sourceStart, s.sourceEnd].map((t) => Math.round(t / secondsToTicks(0.01)) / 100))).toEqual([[0, 5.25], [9.75, 40.25], [49.75, 60]]);
+    expect(seconds(applyOps(project(), parseOps(cuts)).project)).toEqual([[0, 5.25], [9.75, 40.25], [49.75, 60]]);
   });
 });
 
-describe('micGainSuggestion', () => {
-  const project = (gain = 1): Project => {
+describe('micLevelSuggestion', () => {
+  const project = (mic: Record<string, unknown> = {}): Project => {
     const p = addRecording(createProject('Demo'), recording(60, { mic: source('mic', 60) }));
-    return { ...p, audio: { ...p.audio, mic: { ...p.audio.mic, gain } } };
+    return { ...p, audio: { ...p.audio, mic: { ...p.audio.mic, ...mic } } };
   };
-  const mic = (integratedLufs: number, truePeakDbtp: number) => ({ ...healthy(), audio: { mic: { ...cleanAudio, integratedLufs, truePeakDbtp }, system: null } });
+  const voice = { highpassHz: 0, normalize: { enabled: false, targetLufs: -16, measuredLufs: null } };
+  const mic = (integratedLufs: number, truePeakDbtp: number) => withMic({ integratedLufs, truePeakDbtp });
 
-  it('lowers a loud mic toward -16 LUFS', () => {
-    const s = micGainSuggestion(project(), [mic(-10, -0.5)]);
-    expect(s).toMatchObject({ suggestedGain: 0.5, limitedBy: null, op: { op: 'setAudio', patch: { mic: { gain: 0.5 } } } });
+  it('lowers a loud mic toward -16 LUFS with the gain', () => {
+    const s = micLevelSuggestion(project(), [mic(-10, -0.5)]);
+    expect(s).toMatchObject({ method: 'gain', suggestedGain: 0.5, limitedBy: null, op: { op: 'setAudio', patch: { mic: { gain: 0.5 } } } });
     expect(s!.expectedLufs).toBeCloseTo(-16, 0);
   });
 
   it('cannot raise the gain past the editor maximum and says so', () => {
-    expect(micGainSuggestion(project(), [mic(-26, -12)])).toMatchObject({ suggestedGain: 1, limitedBy: 'max-gain', op: null });
-    expect(micGainSuggestion(project(0.5), [mic(-26, -12)])).toMatchObject({ suggestedGain: 1, limitedBy: 'max-gain', op: { op: 'setAudio', patch: { mic: { gain: 1 } } } });
+    expect(micLevelSuggestion(project(), [mic(-26, -12)])).toMatchObject({ suggestedGain: 1, limitedBy: 'max-gain', op: null });
+    expect(micLevelSuggestion(project({ gain: 0.5 }), [mic(-26, -12)])).toMatchObject({ suggestedGain: 1, limitedBy: 'max-gain', op: { op: 'setAudio', patch: { mic: { gain: 1 } } } });
+    expect(micLevelSuggestion(project(), [mic(-53.9, -33.3)])).toMatchObject({ neededGain: 78.52, suggestedGain: 1, limitedBy: 'max-gain', op: null });
+  });
+
+  it('turns on voice normalization when the project supports it', () => {
+    expect(micLevelSuggestion(project(voice), [mic(-38, -20)])).toEqual({
+      method: 'normalize', currentGain: 1, measuredLufs: -38, targetLufs: -16, neededGain: 12.59, suggestedGain: null, expectedLufs: -16, limitedBy: null,
+      op: { op: 'setAudio', patch: { mic: { highpassHz: 80, normalize: { enabled: true } } } },
+    });
+    expect(micLevelSuggestion(project(voice), [mic(-50, -30)])).toMatchObject({ limitedBy: 'max-normalize', expectedLufs: -20 });
+    expect(micLevelSuggestion(project({ highpassHz: 80, normalize: { ...voice.normalize, enabled: true } }), [mic(-38, -20)])!.op).toBeNull();
   });
 
   it('suggests nothing without measured mic audio', () => {
-    expect(micGainSuggestion(project(), [{ ...healthy(), audio: { mic: null, system: null } }])).toBeNull();
-  });
-
-  it('still reports the boost a barely audible mic would need, but not for a dead one', () => {
-    expect(micGainSuggestion(project(), [mic(-53.9, -33.3)])).toMatchObject({ neededGain: 78.52, suggestedGain: 1, limitedBy: 'max-gain', op: null });
-    expect(micGainSuggestion(project(), [mic(-70, -60)])).toBeNull();
+    expect(micLevelSuggestion(project(), [{ ...healthy(), audio: { mic: null, system: null } }])).toBeNull();
+    expect(micLevelSuggestion(project(), [mic(-70, -60)])).toBeNull();
   });
 });
 
-describe('analyzeProject', () => {
-  const fakeRun = (calls: string[][]): Run => async (tool, args) => {
+describe('analyzeProject with a fake ffmpeg', () => {
+  const fakeRun = (calls: string[][], fail: (tool: string, args: string[]) => Error | null = () => null): Run => async (tool, args) => {
     calls.push([tool, ...args]);
     if (args[0] === '-version') return `${tool} version 9`;
+    const error = fail(tool, args);
+    if (error) throw error;
     const file = tool === 'ffprobe' ? args[args.length - 1]! : args[args.indexOf('-i') + 1]!;
     const mic = file.endsWith('mic.m4a');
     if (tool === 'ffprobe') return fixture(mic ? 'ffprobe-mic.json' : 'ffprobe-screen.json');
     return fixture(mic ? 'ffmpeg-mic-quiet.txt' : 'ffmpeg-screen.txt');
   };
 
-  const folder = async (withCursor: boolean) => {
+  const folder = async (cursor: string | null = JSON.stringify({ e: 'm', t: secondsToTicks(1), x: 0.5, y: 0.5 })) => {
     const dir = await mkdtemp(join(tmpdir(), 'momotombo analyze '));
     await mkdir(join(dir, 'media', 'r1'), { recursive: true });
     await writeFile(join(dir, 'media', 'r1', 'screen.mp4'), '');
     await writeFile(join(dir, 'media', 'r1', 'mic.m4a'), '');
-    if (withCursor) await writeFile(join(dir, 'media', 'r1', 'cursor.jsonl'), `${JSON.stringify({ e: 'm', t: secondsToTicks(1), x: 0.5, y: 0.5 })}\n`);
+    if (cursor !== null) await writeFile(join(dir, 'media', 'r1', 'cursor.jsonl'), `${cursor}\n`);
     return dir;
   };
+  const take = (sources: Recording['sources'] = { screen: source('screen', 19.477), mic: source('mic', 19.468) }, extra: Partial<Recording> = {}) =>
+    addRecording(createProject('Demo'), recording(19.477, sources, 'media/r1/cursor.jsonl', extra));
 
-  it('reports missing optional tracks instead of failing, and blocks the silent mic', async () => {
-    const dir = await folder(true);
-    const project = addRecording(createProject('Demo'), recording(19.477, { screen: source('screen', 19.477), mic: source('mic', 19.468) }, 'media/r1/cursor.jsonl'));
+  it('reports missing optional tracks instead of failing', async () => {
+    const dir = await folder();
     const calls: string[][] = [];
-    const report = await analyzeProject(dir, project, fakeRun(calls));
+    const report = await analyzeProject(dir, take(), fakeRun(calls));
     expect(report.recordings[0]!.missing).toEqual(['camera', 'system']);
     expect(report.recordings[0]!.cursor).toMatchObject({ clickCount: 0 });
-    expect(report.recordings[0]!.deadTime!.totalSeconds).toBeGreaterThan(15);
-    expect(codes(report.findings)).toEqual(expect.arrayContaining(['blocker:MIC_SILENT', 'info:CAMERA_MISSING', 'info:SYSTEM_AUDIO_MISSING']));
-    expect(report.verdict).toBe('re-record');
-    expect(report.suggestedOps.every((op) => op.op === 'cut' || op.op === 'setAudio')).toBe(true);
-    expect(calls.filter(([tool]) => tool === 'ffmpeg').some((c) => c.includes(join(dir, 'media', 'r1', 'mic.m4a')))).toBe(true);
+    expect(codes(report.findings)).toEqual(expect.arrayContaining(['info:CAMERA_MISSING', 'info:SYSTEM_AUDIO_MISSING']));
+    expect(calls.some((c) => c.includes(join(dir, 'media', 'r1', 'mic.m4a')))).toBe(true);
   });
 
-  it('blocks a declared screen file that is not on disk', async () => {
-    const dir = await folder(false);
-    const project = addRecording(createProject('Demo'), recording(19.477, { screen: { ...source('screen', 19.477), file: 'media/r1/gone.mp4' }, mic: source('mic', 19.468) }));
-    const report = await analyzeProject(dir, project, fakeRun([]));
-    expect(codes(report.findings)).toEqual(expect.arrayContaining(['blocker:SCREEN_FILE_MISSING', 'info:CURSOR_MISSING']));
+  it('derives the mic silence threshold from the measured level', async () => {
+    const calls: string[][] = [];
+    const report = await analyzeProject(await folder(), take(), fakeRun(calls));
+    expect(calls.flat().find((a) => a.startsWith('silencedetect'))).toBe('silencedetect=noise=-40.8dB:d=0.6');
+    expect(report.recordings[0]!.audio.mic!.silenceThresholdDb).toBe(-40.8);
+  });
+
+  it('places silences in recording time using the start offset and sync offset', async () => {
+    const report = await analyzeProject(await folder(), take(
+      { screen: source('screen', 19.477), mic: source('mic', 19.468, 2) },
+      { syncOffsets: { mic: secondsToTicks(1) } },
+    ), fakeRun([]));
+    expect(report.recordings[0]!.audio.mic!.silences[0]).toEqual({ start: 3, end: 9.917 });
+  });
+
+  it('blocks a declared screen file that is not on disk and reports a missing cursor log as unusable', async () => {
+    const report = await analyzeProject(await folder(null), take({ screen: { ...source('screen', 19.477), file: 'media/r1/gone.mp4' }, mic: source('mic', 19.468) }), fakeRun([]));
+    expect(codes(report.findings)).toEqual(expect.arrayContaining(['blocker:SCREEN_FILE_MISSING', 'info:CURSOR_UNREADABLE']));
     expect(report.recordings[0]!.deadTime).toBeNull();
   });
 
-  it('fails with ToolsMissingError when ffmpeg is not installed', async () => {
-    const dir = await folder(false);
-    const project = addRecording(createProject('Demo'), recording(10, { screen: source('screen', 10) }));
-    const run: Run = async () => { throw new ToolsMissingError(); };
-    await expect(analyzeProject(dir, project, run)).rejects.toBeInstanceOf(ToolsMissingError);
+  it('never reads a source or cursor path that leaves the project folder', async () => {
+    const calls: string[][] = [];
+    const project = take({ screen: source('screen', 19.477), mic: { ...source('mic', 19.468), file: '../outside/mic.m4a' } }, { cursorFile: '../../etc/passwd' });
+    const report = await analyzeProject(await folder(), project, fakeRun(calls));
+    expect(calls.flat().some((a) => a.includes('outside') || a.includes('passwd'))).toBe(false);
+    expect(codes(report.findings)).toEqual(expect.arrayContaining(['blocker:MIC_FILE_OUTSIDE_PROJECT', 'info:CURSOR_UNREADABLE']));
   });
+
+  it('keeps going past a malformed cursor log', async () => {
+    const report = await analyzeProject(await folder('{{{ not a cursor log'), take(), fakeRun([]));
+    expect(codes(report.findings)).toContain('info:CURSOR_UNREADABLE');
+    expect(report.recordings[0]!.audio.mic).not.toBeNull();
+  });
+
+  it('reports an ffmpeg failure on a readable file as an analysis failure, not a reason to re-record', async () => {
+    const report = await analyzeProject(await folder(), take(), fakeRun([], (tool, args) =>
+      tool === 'ffmpeg' && args.some((a) => a.includes('ebur128')) ? new ToolError('ffmpeg', 'failed', 'No such filter: ebur128') : null));
+    expect(codes(report.findings)).toContain('warning:ANALYSIS_FAILED');
+    expect(report.findings.map((f) => f.code)).not.toContain('MIC_UNREADABLE');
+    expect(report.recordings[0]!.media.mic).toMatchObject({ codec: 'opus' });
+  });
+
+  it('reports a timed-out probe as an analysis failure and a rejected probe as an undecodable file', async () => {
+    const onMic = (error: Error) => (tool: string, args: string[]) => (tool === 'ffprobe' && args[args.length - 1]!.endsWith('mic.m4a') ? error : null);
+    const stopped = await analyzeProject(await folder(), take(), fakeRun([], onMic(new ToolError('ffprobe', 'stopped', 'no result after 30 s'))));
+    expect(codes(stopped.findings)).toContain('warning:ANALYSIS_FAILED');
+    const broken = await analyzeProject(await folder(), take(), fakeRun([], onMic(new ToolError('ffprobe', 'failed', 'Invalid data found'))));
+    expect(codes(broken.findings)).toContain('blocker:MIC_UNREADABLE');
+  });
+
+  it('fails with ToolsMissingError when ffmpeg is not installed', async () => {
+    const run: Run = async () => { throw new ToolsMissingError(); };
+    await expect(analyzeProject(await folder(), take(), run)).rejects.toBeInstanceOf(ToolsMissingError);
+  });
+});
+
+describe('momotombo-edit analyze', () => {
+  it('exits with its own code and one line when ffmpeg is not on PATH', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'momotombo cli '));
+    await mkdir(join(root, 'Demo'));
+    await writeFile(join(root, 'Demo', 'project.json'), serializeProject(shortTake(), new Date()));
+    let err = '';
+    const code = await cli(['analyze', 'latest', '--root', root], { out: () => {}, err: (t) => { err += t; }, stdin: async () => '', env: { PATH: root } });
+    expect(code).toBe(EXIT.toolsMissing);
+    expect(err.trim().split('\n')).toEqual(['momotombo-edit: analyze needs ffmpeg and ffprobe on PATH (macOS: brew install ffmpeg).']);
+  });
+});
+
+describe.skipIf(!hasFfmpeg)('analyzeProject with the real ffmpeg', () => {
+  const snapshot = async (dir: string) => {
+    const out: string[] = [];
+    const walk = async (d: string) => {
+      for (const e of await readdir(d, { withFileTypes: true })) {
+        const p = join(d, e.name);
+        if (e.isDirectory()) await walk(p);
+        else {
+          const s = await stat(p);
+          out.push(`${relative(dir, p)} ${s.size} ${s.mtimeMs}`);
+        }
+      }
+    };
+    await walk(dir);
+    return out.sort();
+  };
+
+  it('probes a file whose path has spaces', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'momotombo spaced path '));
+    const file = join(dir, 'a clip with spaces.m4a');
+    execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'sine=f=300:d=1', '-c:a', 'aac', file]);
+    expect(parseProbe(await toolRunner()('ffprobe', ['-v', 'error', '-of', 'json', '-show_streams', '-show_format', file]))).toMatchObject({ codec: 'aac', channels: 1 });
+  });
+
+  it('stops a pass that runs past its timeout', async () => {
+    await expect(toolRunner()('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'anullsrc', '-f', 'null', '-'], 0.5)).rejects.toMatchObject({ reason: 'stopped' });
+  });
+
+  it('rates a quiet but clean voice as fixable and writes nothing into the project', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'momotombo real take '));
+    await mkdir(join(dir, 'media', 'r1'), { recursive: true });
+    const media = (name: string) => join(dir, 'media', 'r1', name);
+    execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'testsrc=s=1920x1080:r=30:d=12', '-c:v', 'mpeg4', '-q:v', '10', media('screen.mp4')]);
+    execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'sine=f=180:r=48000:d=12', '-f', 'lavfi', '-i', 'anoisesrc=r=48000:a=0.0001:d=12', '-filter_complex',
+      "[0]volume='0.13*gt(sin(2*PI*t*0.5),0)*(0.6+0.4*sin(2*PI*t*4))':eval=frame[v];[v][1]amix=inputs=2:normalize=0,aformat=channel_layouts=mono", '-c:a', 'aac', media('mic.m4a')]);
+    const project = addRecording(createProject('Quiet'), recording(12, { screen: source('screen', 12), mic: source('mic', 12) }));
+    const before = await snapshot(dir);
+    const report = await analyzeProject(dir, project);
+    expect(await snapshot(dir)).toEqual(before);
+    const mic = report.recordings[0]!.audio.mic!;
+    expect(mic.integratedLufs).toBeLessThan(-40);
+    expect(mic.silenceShare).toBeLessThan(0.7);
+    expect(codes(report.findings)).toContain('warning:MIC_TOO_QUIET');
+    expect(report.findings.map((f) => f.code)).not.toContain('MIC_SILENT');
+    expect(report.verdict).toBe('edit-with-fixes');
+  }, 30_000);
 });

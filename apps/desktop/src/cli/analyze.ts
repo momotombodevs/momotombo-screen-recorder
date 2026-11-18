@@ -1,11 +1,13 @@
-import { execFile } from 'node:child_process';
-import { access, readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { spawn } from 'node:child_process';
+import { readFile, stat } from 'node:fs/promises';
 import { layoutSegments, parseCursorLog, sequenceDuration, type Project, type Recording, type SourceKind } from '@momotombo/project-model';
 import { secondsToTicks, ticksToSeconds } from '@momotombo/timing';
+import { safeJoin } from '../main/fsutil';
 import type { Op } from './ops';
 
-export const SILENCE_NOISE_DB = -35;
+export const SILENCE_BELOW_LOUDNESS_DB = 18;
+export const SILENCE_ABOVE_NOISE_DB = 10;
+export const SILENCE_THRESHOLD_MAX_DB = -35;
 export const SILENCE_MIN_SECONDS = 0.6;
 export const SILENCE_MERGE_GAP_SECONDS = 0.2;
 export const BLACK_MIN_SECONDS = 0.5;
@@ -13,6 +15,7 @@ export const BLACK_PIXEL_THRESHOLD = 0.1;
 export const FREEZE_NOISE_DB = -60;
 export const FREEZE_MIN_SECONDS = 2;
 export const BRIGHTNESS_SAMPLE_FPS = 1;
+export const ANALYSIS_WIDTH = 960;
 export const CURSOR_IDLE_SECONDS = 3;
 export const DEAD_TIME_CUT_SECONDS = 2;
 export const CUT_PADDING_SECONDS = 0.25;
@@ -21,11 +24,14 @@ export const DEAD_TIME_WARNING_SHARE = 0.15;
 export const TARGET_LUFS = -16;
 export const MAX_TRUE_PEAK_DBTP = -1;
 export const MIC_GAIN_MAX = 1;
-export const GAIN_CHANGE_MIN_DB = 1;
+export const NORMALIZE_MAX_BOOST_DB = 30;
+export const VOICE_HIGHPASS_HZ = 80;
+export const LEVEL_CHANGE_MIN_DB = 1;
+export const EBUR128_SILENT_LUFS = -70;
 export const MIC_SILENT_SHARE = 0.95;
 export const MIC_QUIET_LUFS = -30;
-export const MIC_UNRESCUABLE_LUFS = -45;
-export const MIC_NOISE_FLOOR_DB = -45;
+export const MIC_MIN_SNR_DB = 20;
+export const MIC_NOISY_SNR_DB = 30;
 export const CLIP_SAMPLE_PEAK_DBFS = -0.1;
 export const CLIP_HOT_LUFS = -14;
 export const CAMERA_DARK_YAVG = 60;
@@ -34,35 +40,69 @@ export const MIN_FPS = 24;
 export const DURATION_MISMATCH_SECONDS = 0.5;
 export const SCREEN_STATIC_SECONDS = 10;
 export const MAX_PARALLEL_PASSES = 4;
-export const ANALYSIS_WIDTH = 960;
-export const EBUR128_SILENT_LUFS = -70;
-export const EXIT_TOOLS_MISSING = 3;
+export const PROBE_TIMEOUT_SECONDS = 30;
+export const PASS_TIMEOUT_BASE_SECONDS = 60;
+export const PASS_TIMEOUT_PER_MEDIA_SECOND = 1;
+export const MAX_TOOL_STDOUT_BYTES = 4 * 1024 * 1024;
 
 const THRESHOLDS = {
-  silenceNoiseDb: SILENCE_NOISE_DB, silenceMinSeconds: SILENCE_MIN_SECONDS, blackMinSeconds: BLACK_MIN_SECONDS, blackPixelThreshold: BLACK_PIXEL_THRESHOLD,
-  freezeNoiseDb: FREEZE_NOISE_DB, freezeMinSeconds: FREEZE_MIN_SECONDS, cursorIdleSeconds: CURSOR_IDLE_SECONDS, deadTimeCutSeconds: DEAD_TIME_CUT_SECONDS,
-  cutPaddingSeconds: CUT_PADDING_SECONDS, targetLufs: TARGET_LUFS, maxTruePeakDbtp: MAX_TRUE_PEAK_DBTP, micGainMax: MIC_GAIN_MAX,
-  micQuietLufs: MIC_QUIET_LUFS, micUnrescuableLufs: MIC_UNRESCUABLE_LUFS, micNoiseFloorDb: MIC_NOISE_FLOOR_DB, cameraDarkYavg: CAMERA_DARK_YAVG,
+  silenceBelowLoudnessDb: SILENCE_BELOW_LOUDNESS_DB, silenceAboveNoiseDb: SILENCE_ABOVE_NOISE_DB, silenceThresholdMaxDb: SILENCE_THRESHOLD_MAX_DB,
+  silenceMinSeconds: SILENCE_MIN_SECONDS, blackMinSeconds: BLACK_MIN_SECONDS, blackPixelThreshold: BLACK_PIXEL_THRESHOLD, freezeNoiseDb: FREEZE_NOISE_DB,
+  freezeMinSeconds: FREEZE_MIN_SECONDS, cursorIdleSeconds: CURSOR_IDLE_SECONDS, deadTimeCutSeconds: DEAD_TIME_CUT_SECONDS, cutPaddingSeconds: CUT_PADDING_SECONDS,
+  targetLufs: TARGET_LUFS, maxTruePeakDbtp: MAX_TRUE_PEAK_DBTP, micGainMax: MIC_GAIN_MAX, normalizeMaxBoostDb: NORMALIZE_MAX_BOOST_DB,
+  micQuietLufs: MIC_QUIET_LUFS, micMinSnrDb: MIC_MIN_SNR_DB, micNoisySnrDb: MIC_NOISY_SNR_DB, cameraDarkYavg: CAMERA_DARK_YAVG,
   minScreenHeight: MIN_SCREEN_HEIGHT, minFps: MIN_FPS,
 };
 
 export type Tool = 'ffmpeg' | 'ffprobe';
-export type Run = (tool: Tool, args: string[]) => Promise<string>;
+export type Run = (tool: Tool, args: string[], timeoutSeconds?: number) => Promise<string>;
 
 export class ToolsMissingError extends Error {
   constructor() {
-    super('ffmpeg and ffprobe must be on PATH to analyze a recording (macOS: brew install ffmpeg).');
+    super('analyze needs ffmpeg and ffprobe on PATH (macOS: brew install ffmpeg).');
   }
 }
 
-export const runTool: Run = (tool, args) =>
-  new Promise((done, fail) => {
-    execFile(tool, args, { maxBuffer: 64 * 1024 * 1024 }, (error, stdout, stderr) => {
-      if ((error as NodeJS.ErrnoException | null)?.code === 'ENOENT') fail(new ToolsMissingError());
-      else if (error) fail(new Error(`${tool} failed: ${stderr.trim().split('\n').pop() ?? error.message}`));
-      else done(tool === 'ffprobe' || args[0] === '-version' ? stdout : stderr);
+export class ToolError extends Error {
+  constructor(readonly tool: Tool, readonly reason: 'failed' | 'stopped' | 'too much output', detail: string) {
+    super(`${tool} ${reason}: ${detail}`);
+  }
+}
+
+const KEPT_STDERR = /^\[Parsed_(?!metadata.*frame:)|Summary:|Integrated loudness:|Loudness range:|True peak:|^\s+(I|LRA|Threshold|LRA low|LRA high|Peak):/;
+
+export function toolRunner(env: NodeJS.ProcessEnv = process.env): Run {
+  return (tool, args, timeoutSeconds = PROBE_TIMEOUT_SECONDS) =>
+    new Promise((done, fail) => {
+      const child = spawn(tool, args, { env, stdio: ['ignore', 'pipe', 'pipe'], timeout: timeoutSeconds * 1000, killSignal: 'SIGKILL' });
+      let stdout = '';
+      let overflow = false;
+      let partial = '';
+      const kept: string[] = [];
+      const tail: string[] = [];
+      const take = (line: string) => {
+        if (KEPT_STDERR.test(line)) kept.push(line);
+        else if (line.trim()) tail.splice(0, tail.length, ...tail.slice(-4), line);
+      };
+      child.stdout.setEncoding('utf8').on('data', (chunk: string) => {
+        if (stdout.length + chunk.length > MAX_TOOL_STDOUT_BYTES) overflow = true;
+        else stdout += chunk;
+      });
+      child.stderr.setEncoding('utf8').on('data', (chunk: string) => {
+        const lines = (partial + chunk).split('\n');
+        partial = lines.pop() ?? '';
+        lines.forEach(take);
+      });
+      child.once('error', (e: NodeJS.ErrnoException) => fail(e.code === 'ENOENT' ? new ToolsMissingError() : new ToolError(tool, 'failed', e.message)));
+      child.once('close', (code, signal) => {
+        take(partial);
+        if (signal) fail(new ToolError(tool, 'stopped', `no result after ${timeoutSeconds} s (${signal})`));
+        else if (overflow) fail(new ToolError(tool, 'too much output', `more than ${MAX_TOOL_STDOUT_BYTES} bytes`));
+        else if (code !== 0) fail(new ToolError(tool, 'failed', tail[tail.length - 1] ?? `exit ${code}`));
+        else done(tool === 'ffprobe' || args[0] === '-version' ? stdout : kept.join('\n'));
+      });
     });
-  });
+}
 
 export interface Range { start: number; end: number }
 
@@ -78,13 +118,17 @@ export interface MediaFacts {
   channels: number | null;
 }
 
-export interface AudioStats {
+export interface Loudness {
   integratedLufs: number | null;
   loudnessRangeLu: number | null;
   truePeakDbtp: number | null;
   samplePeakDbfs: number | null;
   noiseFloorDb: number | null;
+}
+
+export interface AudioStats extends Loudness {
   clipping: boolean;
+  silenceThresholdDb: number;
   silenceShare: number;
   silences: Range[];
 }
@@ -93,13 +137,20 @@ export interface VideoStats { black: Range[]; frozen: Range[]; meanBrightness: n
 export interface CursorStats { clickCount: number; idle: Range[]; idleSeconds: number }
 export interface DeadTime { ranges: (Range & { timeline: Range[] })[]; totalSeconds: number }
 
-type MediaEntry = (MediaFacts & { file: string }) | { file: string; error: string };
+export type Track = SourceKind | 'cursor';
+export interface Problem {
+  track: Track;
+  problem: 'missing' | 'outside' | 'unreadable' | 'analysis-failed';
+  file: string;
+  error: string;
+}
 
 export interface RecordingAnalysis {
   id: string;
   durationSeconds: number;
-  missing: (SourceKind | 'cursor')[];
-  media: Partial<Record<SourceKind, MediaEntry>>;
+  missing: Track[];
+  problems: Problem[];
+  media: Partial<Record<SourceKind, MediaFacts & { file: string }>>;
   durationMismatchSeconds: number | null;
   audio: { mic: AudioStats | null; system: AudioStats | null };
   video: { screen: VideoStats | null; camera: VideoStats | null };
@@ -118,20 +169,22 @@ export interface Finding {
 
 export type Verdict = 'edit' | 'edit-with-fixes' | 're-record';
 
-export interface GainSuggestion {
+export interface LevelSuggestion {
+  method: 'normalize' | 'gain';
   currentGain: number;
   measuredLufs: number;
   targetLufs: number;
   neededGain: number;
-  suggestedGain: number;
+  suggestedGain: number | null;
   expectedLufs: number;
-  limitedBy: 'max-gain' | 'true-peak' | null;
+  limitedBy: 'max-gain' | 'true-peak' | 'max-normalize' | null;
   op: Op | null;
 }
 
 const round = (n: number, digits = 3) => Math.round(n * 10 ** digits) / 10 ** digits;
 const finite = (n: number) => (Number.isFinite(n) ? n : null);
 const num = (text: string | undefined) => (text === undefined ? null : finite(Number.parseFloat(text)));
+const rounded = (n: number | null) => (n === null ? null : round(n));
 const rate = (fraction: string | undefined) => {
   const [a, b] = (fraction ?? '').split('/').map(Number);
   return a && b ? round(a / b) : null;
@@ -175,21 +228,42 @@ function ranges(text: string, startKey: string, endKey: string, duration: number
   return out;
 }
 
-export function parseAudioLog(stderr: string, durationSeconds: number): AudioStats {
+export function parseLoudnessLog(stderr: string): Loudness {
   const summary = stderr.slice(Math.max(0, stderr.indexOf('Summary:')));
-  const samplePeakDbfs = num(/Peak level dB:\s*(\S+)/.exec(stderr)?.[1]);
-  const noiseFloorDb = num(/Noise floor dB:\s*(\S+)/.exec(stderr)?.[1]);
-  const silences = ranges(stderr, 'silence_start', 'silence_end', durationSeconds);
   return {
     integratedLufs: num(/\bI:\s*(\S+) LUFS/.exec(summary)?.[1]),
     loudnessRangeLu: num(/\bLRA:\s*(\S+) LU\b/.exec(summary)?.[1]),
     truePeakDbtp: num(/True peak:\s*Peak:\s*(\S+) dBFS/.exec(summary)?.[1]),
-    samplePeakDbfs: samplePeakDbfs === null ? null : round(samplePeakDbfs),
-    noiseFloorDb: noiseFloorDb === null ? null : round(noiseFloorDb),
-    clipping: samplePeakDbfs !== null && samplePeakDbfs >= CLIP_SAMPLE_PEAK_DBFS,
+    samplePeakDbfs: rounded(num(/Peak level dB:\s*(\S+)/.exec(stderr)?.[1])),
+    noiseFloorDb: rounded(num(/Noise floor dB:\s*(\S+)/.exec(stderr)?.[1])),
+  };
+}
+
+export function silenceThresholdDb(level: Loudness): number {
+  const candidates = [
+    ...(level.integratedLufs !== null && level.integratedLufs > EBUR128_SILENT_LUFS ? [level.integratedLufs - SILENCE_BELOW_LOUDNESS_DB] : []),
+    ...(level.noiseFloorDb !== null ? [level.noiseFloorDb + SILENCE_ABOVE_NOISE_DB] : []),
+  ];
+  return round(Math.min(SILENCE_THRESHOLD_MAX_DB, candidates.length ? Math.max(...candidates) : SILENCE_THRESHOLD_MAX_DB), 1);
+}
+
+export function parseSilenceLog(stderr: string, durationSeconds: number): Range[] {
+  return ranges(stderr, 'silence_start', 'silence_end', durationSeconds);
+}
+
+export function audioStats(level: Loudness, thresholdDb: number, silences: Range[], durationSeconds: number): AudioStats {
+  return {
+    ...level,
+    clipping: level.samplePeakDbfs !== null && level.samplePeakDbfs >= CLIP_SAMPLE_PEAK_DBFS,
+    silenceThresholdDb: thresholdDb,
     silenceShare: durationSeconds > 0 ? round(Math.min(1, total(silences) / durationSeconds)) : 0,
     silences,
   };
+}
+
+export function parseAudioLog(stderr: string, durationSeconds: number): AudioStats {
+  const level = parseLoudnessLog(stderr);
+  return audioStats(level, SILENCE_THRESHOLD_MAX_DB, parseSilenceLog(stderr, durationSeconds), durationSeconds);
 }
 
 export function parseVideoLog(stderr: string, durationSeconds: number): VideoStats {
@@ -205,6 +279,7 @@ export function parseVideoLog(stderr: string, durationSeconds: number): VideoSta
 export function cursorActivity(text: string, recordingSeconds: number): CursorStats {
   const track = parseCursorLog(text);
   const times = [...track.samples, ...track.clicks, ...track.scrolls].map((e) => ticksToSeconds(e.t)).filter((t) => t >= 0 && t <= recordingSeconds).sort((a, b) => a - b);
+  if (times.length === 0 && text.trim()) throw new Error('no valid cursor events');
   const edges = [0, ...times, recordingSeconds];
   const idle: Range[] = [];
   for (let i = 1; i < edges.length; i++) {
@@ -235,6 +310,14 @@ function intersect(a: Range[], b: Range[]): Range[] {
   return out.sort((p, q) => p.start - q.start);
 }
 
+export function deadTimeRanges(rec: Pick<RecordingAnalysis, 'audio' | 'video' | 'cursor'>): Range[] | null {
+  if (!rec.cursor || !rec.audio.mic) return null;
+  const quiet = [rec.audio.system?.silences, rec.video.screen?.frozen]
+    .filter((r): r is Range[] => r !== undefined)
+    .reduce((acc, r) => intersect(acc, merge(r, SILENCE_MERGE_GAP_SECONDS)), intersect(merge(rec.audio.mic.silences, SILENCE_MERGE_GAP_SECONDS), rec.cursor.idle));
+  return quiet;
+}
+
 function toTimeline(project: Project, recordingId: string, range: Range): Range[] {
   return layoutSegments(project).flatMap((p) => {
     if (p.segment.recordingId !== recordingId) return [];
@@ -254,7 +337,9 @@ export function suggestCuts(project: Project, dead: (Range & { recordingId: stri
     .map((r): Op => ({ op: 'cut', start: r.start, end: r.end }));
 }
 
-export function micGainSuggestion(project: Project, recordings: RecordingAnalysis[]): GainSuggestion | null {
+interface MicChannel { gain: number; highpassHz?: number; normalize?: { enabled: boolean; targetLufs: number } }
+
+export function micLevelSuggestion(project: Project, recordings: RecordingAnalysis[]): LevelSuggestion | null {
   const measured = recordings.flatMap((r) => {
     const mic = r.audio.mic;
     return mic?.integratedLufs != null && mic.integratedLufs > EBUR128_SILENT_LUFS ? [{ lufs: mic.integratedLufs, peak: mic.truePeakDbtp, weight: r.durationSeconds }] : [];
@@ -262,83 +347,115 @@ export function micGainSuggestion(project: Project, recordings: RecordingAnalysi
   if (measured.length === 0) return null;
   const weight = measured.reduce((s, m) => s + m.weight, 0) || 1;
   const measuredLufs = round(10 * Math.log10(measured.reduce((s, m) => s + m.weight * 10 ** (m.lufs / 10), 0) / weight), 1);
+  const channel = project.audio.mic as MicChannel;
+  const currentGain = channel.gain;
+
+  if (channel.normalize && typeof channel.highpassHz === 'number') {
+    const targetLufs = channel.normalize.targetLufs;
+    const neededDb = targetLufs - measuredLufs;
+    const capped = neededDb > NORMALIZE_MAX_BOOST_DB;
+    const done = channel.normalize.enabled && channel.highpassHz > 0;
+    return {
+      method: 'normalize', currentGain, measuredLufs, targetLufs,
+      neededGain: round(10 ** (neededDb / 20), 2),
+      suggestedGain: null,
+      expectedLufs: round(capped ? measuredLufs + NORMALIZE_MAX_BOOST_DB : targetLufs, 1),
+      limitedBy: capped ? 'max-normalize' : null,
+      op: done || Math.abs(neededDb) < LEVEL_CHANGE_MIN_DB ? null : { op: 'setAudio', patch: { mic: { highpassHz: VOICE_HIGHPASS_HZ, normalize: { enabled: true } } } },
+    };
+  }
+
   const peaks = measured.flatMap((m) => (m.peak === null ? [] : [m.peak]));
   const neededDb = TARGET_LUFS - measuredLufs;
   const headroomDb = peaks.length ? MAX_TRUE_PEAK_DBTP - Math.max(...peaks) : Infinity;
-  const allowedDb = Math.min(neededDb, headroomDb);
-  const allowed = 10 ** (allowedDb / 20);
+  const allowed = 10 ** (Math.min(neededDb, headroomDb) / 20);
   const suggestedGain = round(Math.min(MIC_GAIN_MAX, allowed), 2);
-  const limitedBy = allowed > MIC_GAIN_MAX ? 'max-gain' : headroomDb < neededDb ? 'true-peak' : null;
-  const currentGain = project.audio.mic.gain;
   const changeDb = Math.abs(20 * Math.log10(suggestedGain / currentGain));
   return {
-    currentGain,
-    measuredLufs,
-    targetLufs: TARGET_LUFS,
+    method: 'gain', currentGain, measuredLufs, targetLufs: TARGET_LUFS,
     neededGain: round(10 ** (neededDb / 20), 2),
     suggestedGain,
     expectedLufs: round(measuredLufs + 20 * Math.log10(suggestedGain), 1),
-    limitedBy,
-    op: suggestedGain > 0 && changeDb >= GAIN_CHANGE_MIN_DB ? { op: 'setAudio', patch: { mic: { gain: suggestedGain } } } : null,
+    limitedBy: allowed > MIC_GAIN_MAX ? 'max-gain' : headroomDb < neededDb ? 'true-peak' : null,
+    op: suggestedGain > 0 && changeDb >= LEVEL_CHANGE_MIN_DB ? { op: 'setAudio', patch: { mic: { gain: suggestedGain } } } : null,
   };
 }
 
 const FILE_SEVERITY: Record<SourceKind, Finding['severity']> = { screen: 'blocker', mic: 'blocker', camera: 'warning', system: 'warning' };
-const TRACK_NAME: Record<SourceKind, string> = { screen: 'screen video', mic: 'microphone track', camera: 'camera video', system: 'system audio track' };
+const TRACK_NAME: Record<Track, string> = { screen: 'screen video', mic: 'microphone track', camera: 'camera video', system: 'system audio track', cursor: 'cursor log' };
 const CODE_PREFIX: Record<SourceKind, string> = { screen: 'SCREEN', mic: 'MIC', camera: 'CAMERA', system: 'SYSTEM_AUDIO' };
 
+function problemFinding(p: Problem): Omit<Finding, 'recordingId'> {
+  const evidence = { track: p.track, file: p.file, error: p.error };
+  if (p.problem === 'analysis-failed')
+    return { severity: 'warning', code: 'ANALYSIS_FAILED', message: `The ${TRACK_NAME[p.track]} could not be analyzed (${p.error}); its checks are missing from this report.`, evidence,
+      advice: 'This is a problem with the analysis tools, not the take: update ffmpeg (brew upgrade ffmpeg) and run analyze again.' };
+  if (p.track === 'cursor')
+    return { severity: 'info', code: 'CURSOR_UNREADABLE', message: `The cursor log cannot be used (${p.error}), so dead time is not measured.`, evidence,
+      advice: 'Record with the native recorder so cursor moves and clicks are logged.' };
+  const prefix = CODE_PREFIX[p.track];
+  if (p.problem === 'unreadable')
+    return { severity: FILE_SEVERITY[p.track], code: `${prefix}_UNREADABLE`, message: `The ${TRACK_NAME[p.track]} cannot be decoded (${p.error}).`, evidence,
+      advice: 'Let the recording finish saving before closing the app, and keep enough free disk space while recording.' };
+  return { severity: FILE_SEVERITY[p.track], code: p.problem === 'outside' ? `${prefix}_FILE_OUTSIDE_PROJECT` : `${prefix}_FILE_MISSING`,
+    message: p.problem === 'outside' ? `The ${TRACK_NAME[p.track]} path points outside the project folder.` : `The ${TRACK_NAME[p.track]} is listed in the project but its file is gone.`,
+    evidence, advice: 'Do not move or rename files inside the project folder; record the take again if the file is lost.' };
+}
+
 export function findingsFor(rec: RecordingAnalysis): Finding[] {
-  const out: Finding[] = [];
+  const out: Finding[] = rec.problems.map((p) => ({ ...problemFinding(p), recordingId: rec.id }));
   const add = (severity: Finding['severity'], code: string, message: string, evidence: Record<string, unknown>, advice: string) =>
     out.push({ severity, code, message, evidence, advice, recordingId: rec.id });
 
-  for (const [kind, entry] of Object.entries(rec.media) as [SourceKind, MediaEntry][]) {
-    if (!('error' in entry)) continue;
-    const missing = entry.error === 'file not found';
-    add(FILE_SEVERITY[kind], `${CODE_PREFIX[kind]}_${missing ? 'FILE_MISSING' : 'UNREADABLE'}`,
-      `The ${TRACK_NAME[kind]} ${missing ? 'is listed in the project but its file is gone' : 'could not be read'}.`,
-      { file: entry.file, error: entry.error },
-      missing ? 'Do not move or delete files inside the project folder; record the take again if the file is lost.' : 'Let the recording finish saving before closing the app, and keep enough free disk space while recording.');
-  }
-
   if (rec.missing.includes('mic'))
-    add('blocker', 'MIC_MISSING', 'The take has no microphone track.', {}, 'Turn on the microphone in the recorder and pick your mic before you start.');
+    add('warning', 'MIC_MISSING', 'The take has no microphone track.', {}, 'If you meant to narrate, turn on the microphone in the recorder and pick your mic before you start; a silent demo is fine as it is.');
+  if (rec.missing.includes('screen'))
+    add('warning', 'SCREEN_MISSING', 'The take has no screen video.', {}, 'Pick a display or window in the recorder before you start if the video should show your screen.');
   if (rec.missing.includes('camera')) add('info', 'CAMERA_MISSING', 'The take has no camera video.', {}, 'Turn on the camera in the recorder if you want your face on screen.');
   if (rec.missing.includes('system')) add('info', 'SYSTEM_AUDIO_MISSING', 'The take has no system audio track.', {}, 'Turn on system audio in the recorder if the demo plays sound.');
   if (rec.missing.includes('cursor')) add('info', 'CURSOR_MISSING', 'The take has no cursor log, so dead time cannot be measured.', {}, 'Record with the native recorder so cursor moves and clicks are logged.');
 
   const mic = rec.audio.mic;
   if (mic) {
-    const level = { integratedLufs: mic.integratedLufs, truePeakDbtp: mic.truePeakDbtp, silenceShare: mic.silenceShare };
-    if (mic.silenceShare >= MIC_SILENT_SHARE)
-      add('blocker', 'MIC_SILENT', `The microphone is silent or far too quiet for ${Math.round(mic.silenceShare * 100)}% of the take.`, level,
+    const lufs = mic.integratedLufs;
+    const snrDb = lufs !== null && mic.noiseFloorDb !== null ? round(lufs - mic.noiseFloorDb, 1) : null;
+    const boostDb = lufs === null ? 0 : TARGET_LUFS - lufs;
+    const level = { integratedLufs: lufs, truePeakDbtp: mic.truePeakDbtp, noiseFloorDb: mic.noiseFloorDb, snrDb, silenceShare: mic.silenceShare, silenceThresholdDb: mic.silenceThresholdDb };
+    const quiet = lufs !== null && lufs < MIC_QUIET_LUFS;
+    if (lufs === null || lufs <= EBUR128_SILENT_LUFS || mic.silenceShare >= MIC_SILENT_SHARE)
+      add('blocker', 'MIC_SILENT', `The microphone picked up no voice: ${Math.round(mic.silenceShare * 100)}% of the take is at the room-noise level.`, level,
         'Check that the right microphone is selected and not muted, speak within a hand span of it, and raise its input level in System Settings > Sound.');
-    else if (mic.integratedLufs !== null && mic.integratedLufs < MIC_QUIET_LUFS) {
-      const lost = mic.integratedLufs < MIC_UNRESCUABLE_LUFS;
-      add(lost ? 'blocker' : 'warning', 'MIC_TOO_QUIET', `The voice is quiet (${mic.integratedLufs} LUFS; aim for about ${TARGET_LUFS}).`, level,
-        lost ? 'Move much closer to the microphone and raise its input level; boosting this much in the edit would make the noise as loud as the voice.' : 'Move closer to the microphone or raise its input level a little.');
+    else if (snrDb !== null && snrDb < MIC_MIN_SNR_DB)
+      add('blocker', quiet ? 'MIC_TOO_QUIET' : 'MIC_NOISY',
+        `The voice is only ${snrDb} dB above the room noise${quiet ? ` (${lufs} LUFS)` : ''}; bringing it to ${TARGET_LUFS} LUFS would make the noise about ${round((mic.noiseFloorDb ?? 0) + boostDb, 1)} dB.`, level,
+        quiet ? 'Move much closer to the microphone and raise its input level; a boost this large in the edit makes the noise as loud as the voice.' : 'Record in a quieter room: close windows, turn off fans or AC, and close noisy apps.');
+    else {
+      if (quiet)
+        add(boostDb > NORMALIZE_MAX_BOOST_DB ? 'blocker' : 'warning', 'MIC_TOO_QUIET',
+          `The voice is quiet (${lufs} LUFS; aim for about ${TARGET_LUFS}). ${boostDb > NORMALIZE_MAX_BOOST_DB ? 'It needs more boost than the editor can give.' : 'Normalizing it in the edit is enough.'}`, level,
+          'Move closer to the microphone or raise its input level for the next take.');
+      if (snrDb !== null && snrDb < MIC_NOISY_SNR_DB)
+        add('warning', 'MIC_NOISY', `The room noise is noticeable: the voice is ${snrDb} dB above it.`, level,
+          'Close noisy apps and windows, turn off fans or AC, and get closer to the mic so you can lower its input level.');
     }
     if (mic.clipping) {
-      const hot = mic.integratedLufs !== null && mic.integratedLufs > CLIP_HOT_LUFS;
+      const hot = lufs !== null && lufs > CLIP_HOT_LUFS;
       add(hot ? 'blocker' : 'warning', 'MIC_CLIPPING', `The microphone clips (sample peak ${mic.samplePeakDbfs} dBFS${hot ? ' while running hot' : ''}).`, level,
         'Lower the microphone input level or sit a little farther away so your loudest words stay below the top of the meter.');
     } else if (mic.truePeakDbtp !== null && mic.truePeakDbtp > MAX_TRUE_PEAK_DBTP)
       add('info', 'MIC_PEAKS_HIGH', `The loudest peaks reach ${mic.truePeakDbtp} dBTP, close to clipping.`, level, 'Lower the microphone input level slightly for the next take.');
-    if (mic.noiseFloorDb !== null && mic.noiseFloorDb > MIC_NOISE_FLOOR_DB)
-      add('warning', 'MIC_NOISY', `The room noise under the voice is high (noise floor ${mic.noiseFloorDb} dB).`, { noiseFloorDb: mic.noiseFloorDb },
-        'Close noisy apps and windows, turn off fans or AC, and get closer to the mic so you can lower its input level.');
   }
 
   const system = rec.audio.system;
   if (system?.clipping)
     add('warning', 'SYSTEM_AUDIO_CLIPPING', `The system audio clips (sample peak ${system.samplePeakDbfs} dBFS).`, { samplePeakDbfs: system.samplePeakDbfs },
       'Lower the volume of the app you are demoing before you record.');
-  else if (system && system.silenceShare >= MIC_SILENT_SHARE)
-    add('info', 'SYSTEM_AUDIO_SILENT', 'The system audio track is silent.', { silenceShare: system.silenceShare },
+  else if (system && (system.integratedLufs === null || system.integratedLufs <= EBUR128_SILENT_LUFS || system.silenceShare >= MIC_SILENT_SHARE))
+    add('info', 'SYSTEM_AUDIO_SILENT', 'The system audio track is silent.', { integratedLufs: system.integratedLufs, silenceShare: system.silenceShare },
       'Turn system audio off when the demo makes no sound, or mute it in the edit.');
 
   const screen = rec.media.screen;
-  if (screen && !('error' in screen)) {
+  if (screen) {
     if (screen.height !== null && screen.height < MIN_SCREEN_HEIGHT && (screen.width ?? 0) < 1920)
       add('warning', 'SCREEN_LOW_RESOLUTION', `The screen was recorded at ${screen.width}x${screen.height}, below 1080p.`, { width: screen.width, height: screen.height },
         'Record the full display or a larger window, and use a display set to at least 1920x1080.');
@@ -347,7 +464,7 @@ export function findingsFor(rec: RecordingAnalysis): Finding[] {
         'Set the recording to 30 or 60 fps and close heavy apps so the computer keeps up.');
   }
   const camera = rec.media.camera;
-  if (camera && !('error' in camera) && camera.frameRate !== null && camera.frameRate < MIN_FPS)
+  if (camera && camera.frameRate !== null && camera.frameRate < MIN_FPS)
     add('warning', 'CAMERA_LOW_FPS', `The camera delivered only ${camera.frameRate} fps.`, { frameRate: camera.frameRate },
       'Add light in front of you (low light slows webcams down) and close other apps that use the camera.');
 
@@ -370,7 +487,7 @@ export function findingsFor(rec: RecordingAnalysis): Finding[] {
 
   if (rec.durationMismatchSeconds !== null && rec.durationMismatchSeconds > DURATION_MISMATCH_SECONDS)
     add('warning', 'DURATION_MISMATCH', `The tracks differ in length by ${rec.durationMismatchSeconds} s, so they may drift out of sync.`,
-      Object.fromEntries(Object.entries(rec.media).map(([k, m]) => [k, 'error' in m ? null : m.durationSeconds])),
+      Object.fromEntries(Object.entries(rec.media).map(([k, m]) => [k, m.durationSeconds])),
       'Close heavy apps while recording and stop the recording from the recorder, not by quitting the app.');
 
   const dead = rec.deadTime;
@@ -378,7 +495,7 @@ export function findingsFor(rec: RecordingAnalysis): Finding[] {
     const long = longest(dead.ranges);
     const severe = long >= DEAD_TIME_WARNING_SECONDS || dead.totalSeconds >= DEAD_TIME_WARNING_SHARE * rec.durationSeconds;
     if (severe || long >= DEAD_TIME_CUT_SECONDS)
-      add(severe ? 'warning' : 'info', 'DEAD_TIME', `${dead.totalSeconds} s of the take has no voice and no cursor activity (longest ${round(long, 1)} s).`,
+      add(severe ? 'warning' : 'info', 'DEAD_TIME', `${dead.totalSeconds} s of the take has no voice, no cursor activity and nothing changing on screen (longest ${round(long, 1)} s).`,
         { totalSeconds: dead.totalSeconds, longestSeconds: round(long), count: dead.ranges.length },
         'Plan the next step before you record it, and pause the recording while you look something up.');
   }
@@ -410,73 +527,105 @@ function limiter(size: number) {
 }
 
 const KINDS: SourceKind[] = ['screen', 'camera', 'mic', 'system'];
+const AUDIO = (kind: SourceKind) => kind === 'mic' || kind === 'system';
+const INPUT = (file: string) => ['-hide_banner', '-nostats', '-nostdin', '-i', file];
 
-function passArgs(kind: SourceKind, file: string): string[] {
-  const common = ['-hide_banner', '-nostats', '-nostdin', '-i', file];
-  if (kind === 'mic' || kind === 'system') {
-    return [...common, '-vn', '-af',
-      `ebur128=peak=true:framelog=verbose,astats=measure_perchannel=none:measure_overall=Peak_level+Noise_floor,silencedetect=noise=${SILENCE_NOISE_DB}dB:d=${SILENCE_MIN_SECONDS}`,
-      '-f', 'null', '-'];
-  }
+const loudnessArgs = (file: string) => [...INPUT(file), '-vn', '-af',
+  'ebur128=peak=true:framelog=verbose,astats=measure_perchannel=none:measure_overall=Peak_level+Noise_floor', '-f', 'null', '-'];
+const silenceArgs = (file: string, thresholdDb: number) => [...INPUT(file), '-vn', '-af', `silencedetect=noise=${thresholdDb}dB:d=${SILENCE_MIN_SECONDS}`, '-f', 'null', '-'];
+const videoArgs = (kind: SourceKind, file: string) => {
   const detect = `scale=w='min(${ANALYSIS_WIDTH},iw)':h=-2,blackdetect=d=${BLACK_MIN_SECONDS}:pix_th=${BLACK_PIXEL_THRESHOLD},freezedetect=n=${FREEZE_NOISE_DB}dB:d=${FREEZE_MIN_SECONDS}`;
   const brightness = kind === 'camera' ? `,fps=${BRIGHTNESS_SAMPLE_FPS},signalstats,metadata=print:key=lavfi.signalstats.YAVG` : '';
-  return [...common, '-an', '-vf', detect + brightness, '-f', 'null', '-'];
-}
+  return [...INPUT(file), '-an', '-vf', detect + brightness, '-f', 'null', '-'];
+};
 
 const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
+const passTimeout = (seconds: number) => PASS_TIMEOUT_BASE_SECONDS + PASS_TIMEOUT_PER_MEDIA_SECOND * seconds;
+
+type Pass =
+  | { kind: SourceKind; facts: MediaFacts; audio?: AudioStats; video?: VideoStats }
+  | { kind: SourceKind; problem: Problem; facts?: MediaFacts };
+
+async function analyzeSource(dir: string, rec: Recording, kind: SourceKind, run: Run, slot: ReturnType<typeof limiter>): Promise<Pass> {
+  const source = rec.sources[kind]!;
+  const fail = (problem: Problem['problem'], error: string, facts?: MediaFacts): Pass => ({ kind, problem: { track: kind, problem, file: source.file, error }, ...(facts ? { facts } : {}) });
+  const path = safeJoin(dir, source.file);
+  if (!path) return fail('outside', 'path outside the project folder');
+  const info = await stat(path).catch(() => null);
+  if (!info?.isFile()) return fail('missing', 'file not found');
+
+  let facts: MediaFacts;
+  try {
+    facts = parseProbe(await run('ffprobe', ['-v', 'error', '-of', 'json', '-show_streams', '-show_format', path], PROBE_TIMEOUT_SECONDS));
+  } catch (e) {
+    if (e instanceof ToolsMissingError) throw e;
+    return fail(e instanceof ToolError && e.reason === 'failed' ? 'unreadable' : 'analysis-failed', errorText(e));
+  }
+  const wanted = AUDIO(kind) ? facts.sampleRate !== null : facts.width !== null;
+  if (!facts.codec || !wanted) return fail('unreadable', `no ${AUDIO(kind) ? 'audio' : 'video'} stream`, facts);
+
+  const length = facts.durationSeconds ?? ticksToSeconds(source.duration);
+  const offset = ticksToSeconds(source.startOffset + (rec.syncOffsets[kind] ?? 0));
+  const timeout = passTimeout(length);
+  try {
+    if (AUDIO(kind)) {
+      const level = parseLoudnessLog(await slot(() => run('ffmpeg', loudnessArgs(path), timeout)));
+      const threshold = silenceThresholdDb(level);
+      const silences = parseSilenceLog(await slot(() => run('ffmpeg', silenceArgs(path, threshold), timeout)), length);
+      const audio = audioStats(level, threshold, silences, length);
+      return { kind, facts, audio: { ...audio, silences: shift(audio.silences, offset) } };
+    }
+    const video = parseVideoLog(await slot(() => run('ffmpeg', videoArgs(kind, path), timeout)), length);
+    return { kind, facts, video: { ...video, black: shift(video.black, offset), frozen: shift(video.frozen, offset) } };
+  } catch (e) {
+    if (e instanceof ToolsMissingError) throw e;
+    return fail('analysis-failed', errorText(e), facts);
+  }
+}
+
+async function analyzeCursor(dir: string, rec: Recording, recordingSeconds: number): Promise<{ cursor: CursorStats | null; problem: Problem | null }> {
+  if (!rec.cursorFile) return { cursor: null, problem: null };
+  const problem = (error: string): Problem => ({ track: 'cursor', problem: 'unreadable', file: rec.cursorFile!, error });
+  const path = safeJoin(dir, rec.cursorFile);
+  if (!path) return { cursor: null, problem: { ...problem('path outside the project folder'), problem: 'outside' } };
+  try {
+    return { cursor: cursorActivity(await readFile(path, 'utf8'), recordingSeconds), problem: null };
+  } catch (e) {
+    return { cursor: null, problem: problem(errorText(e)) };
+  }
+}
 
 async function analyzeRecording(dir: string, project: Project, rec: Recording, run: Run, slot: ReturnType<typeof limiter>): Promise<RecordingAnalysis> {
   const durationSeconds = round(ticksToSeconds(rec.duration));
-  const missing: RecordingAnalysis['missing'] = KINDS.filter((k) => !rec.sources[k]);
+  const missing: Track[] = KINDS.filter((k) => !rec.sources[k]);
   if (!rec.cursorFile) missing.push('cursor');
 
-  const passes = await Promise.all(KINDS.flatMap((kind) => {
-    const source = rec.sources[kind];
-    if (!source) return [];
-    const path = join(dir, source.file);
-    return [(async () => {
-      try {
-        await access(path);
-      } catch {
-        return { kind, entry: { file: source.file, error: 'file not found' } as MediaEntry, log: null };
-      }
-      try {
-        const [probe, log] = await Promise.all([run('ffprobe', ['-v', 'error', '-of', 'json', '-show_streams', '-show_format', path]), slot(() => run('ffmpeg', passArgs(kind, path)))]);
-        return { kind, entry: { file: source.file, ...parseProbe(probe) } as MediaEntry, log };
-      } catch (e) {
-        if (e instanceof ToolsMissingError) throw e;
-        return { kind, entry: { file: source.file, error: errorText(e) } as MediaEntry, log: null };
-      }
-    })()];
-  }));
+  const [passes, cursorResult] = await Promise.all([
+    Promise.all(KINDS.filter((k) => rec.sources[k]).map((k) => analyzeSource(dir, rec, k, run, slot))),
+    analyzeCursor(dir, rec, durationSeconds),
+  ]);
 
+  const problems: Problem[] = [];
   const media: RecordingAnalysis['media'] = {};
   const audio: RecordingAnalysis['audio'] = { mic: null, system: null };
   const video: RecordingAnalysis['video'] = { screen: null, camera: null };
-  for (const { kind, entry, log } of passes) {
-    media[kind] = entry;
-    if (log === null || 'error' in entry) continue;
-    const length = entry.durationSeconds ?? ticksToSeconds(rec.sources[kind]!.duration);
-    const offset = ticksToSeconds(rec.sources[kind]!.startOffset + (rec.syncOffsets[kind] ?? 0));
-    if (kind === 'mic' || kind === 'system') {
-      const stats = parseAudioLog(log, length);
-      audio[kind] = { ...stats, silences: shift(stats.silences, offset) };
-    } else {
-      const stats = parseVideoLog(log, length);
-      video[kind] = { ...stats, black: shift(stats.black, offset), frozen: shift(stats.frozen, offset) };
-    }
+  for (const pass of passes) {
+    if (pass.facts) media[pass.kind] = { file: rec.sources[pass.kind]!.file, ...pass.facts };
+    if ('problem' in pass) problems.push(pass.problem);
+    else if (pass.audio) audio[pass.kind as 'mic' | 'system'] = pass.audio;
+    else if (pass.video) video[pass.kind as 'screen' | 'camera'] = pass.video;
   }
+  if (cursorResult.problem) problems.push(cursorResult.problem);
 
-  const lengths = Object.values(media).flatMap((m) => ('error' in m || m.durationSeconds === null ? [] : [m.durationSeconds]));
-  const cursorText = rec.cursorFile ? await readFile(join(dir, rec.cursorFile), 'utf8').catch(() => null) : null;
-  if (rec.cursorFile && cursorText === null) missing.push('cursor');
-  const cursor = cursorText === null ? null : cursorActivity(cursorText, durationSeconds);
-  const deadRanges = cursor && audio.mic ? intersect(merge(audio.mic.silences, SILENCE_MERGE_GAP_SECONDS), cursor.idle) : null;
+  const lengths = Object.values(media).flatMap((m) => (m.durationSeconds === null ? [] : [m.durationSeconds]));
+  const cursor = cursorResult.cursor;
+  const deadRanges = deadTimeRanges({ audio, video, cursor });
 
   return {
     id: rec.id,
     durationSeconds,
     missing,
+    problems,
     media,
     durationMismatchSeconds: lengths.length > 1 ? round(Math.max(...lengths) - Math.min(...lengths)) : null,
     audio,
@@ -489,7 +638,7 @@ async function analyzeRecording(dir: string, project: Project, rec: Recording, r
   };
 }
 
-export async function analyzeProject(dir: string, project: Project, run: Run = runTool) {
+export async function analyzeProject(dir: string, project: Project, run: Run = toolRunner()) {
   const began = Date.now();
   const [ffmpegVersion] = await Promise.all([run('ffmpeg', ['-version']), run('ffprobe', ['-version'])]);
   const slot = limiter(MAX_PARALLEL_PASSES);
@@ -498,7 +647,7 @@ export async function analyzeProject(dir: string, project: Project, run: Run = r
   const findings = recordings.flatMap(findingsFor);
   const order = { blocker: 0, warning: 1, info: 2 };
   findings.sort((a, b) => order[a.severity] - order[b.severity]);
-  const micGain = micGainSuggestion(project, recordings);
+  const micLevel = micLevelSuggestion(project, recordings);
   const cuts = suggestCuts(project, recordings.flatMap((r) => (r.deadTime?.ranges ?? []).map((d) => ({ ...d, recordingId: r.id }))));
   const count = (severity: Finding['severity']) => findings.filter((f) => f.severity === severity).length;
   return {
@@ -518,19 +667,9 @@ export async function analyzeProject(dir: string, project: Project, run: Run = r
       elapsedSeconds: round((Date.now() - began) / 1000, 2),
     },
     findings,
-    suggestedOps: [...cuts, ...(micGain?.op ? [micGain.op] : [])],
-    micGain,
+    suggestedOps: [...cuts, ...(micLevel?.op ? [micLevel.op] : [])],
+    micLevel,
     recordings,
     thresholds: THRESHOLDS,
   };
-}
-
-export async function analyzeCommand(dir: string, project: Project) {
-  try {
-    return await analyzeProject(dir, project);
-  } catch (e) {
-    if (!(e instanceof ToolsMissingError)) throw e;
-    process.stderr.write(`momotombo-edit: ${e.message}\n`);
-    process.exit(EXIT_TOOLS_MISSING);
-  }
 }

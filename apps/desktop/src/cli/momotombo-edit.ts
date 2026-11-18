@@ -22,7 +22,7 @@ import {
   validatedProjectText,
   writeProjectTextIfUnchanged,
 } from "../main/project-file";
-import { ToolsMissingError, analyzeProject } from "./analyze";
+import { ToolsMissingError, analyzeProject, toolRunner } from "./analyze";
 import { OpError, applyOps, describeProject, parseOps, type Op } from "./ops";
 
 const USAGE = `momotombo-edit: edit Momotombo projects from the command line.
@@ -269,7 +269,7 @@ async function main(argv: string[], io: Io): Promise<unknown> {
     }
     case "analyze": {
       const { dir, project } = pick(found, ref, root);
-      return analyzeProject(dir, project);
+      return analyzeProject(dir, project, toolRunner(io.env));
     }
     case "open": {
       if (values.root)
