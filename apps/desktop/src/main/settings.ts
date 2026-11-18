@@ -1,12 +1,14 @@
 import { readFile } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
 import { app } from 'electron';
+import { DEFAULT_RECORDER_PREFS, RecorderPrefs } from '@momotombo/protocol';
 import { DEFAULT_SETTINGS, resolveLang, translate, type AppSettings, type Lang, type Params, type SettingsInfo } from '../shared/i18n';
 import { writeFileAtomic } from './fsutil';
 
 let settings: AppSettings = { ...DEFAULT_SETTINGS };
 /** The folder the last export was saved to through the save dialog (absolute path). */
 let lastExportFolder: string | null = null;
+let recorder: RecorderPrefs = { ...DEFAULT_RECORDER_PREFS };
 let lang: Lang = 'es';
 const listeners = new Set<(info: SettingsInfo) => void>();
 /** Smoke runs keep settings in memory so they never touch the user's settings file. */
@@ -25,6 +27,16 @@ export function settingsInfo(): SettingsInfo {
   return { language: settings.language, resolved: lang, system: systemLocales() };
 }
 
+function parseRecorderPrefs(value: unknown): RecorderPrefs {
+  const raw = (value && typeof value === 'object' ? value : {}) as Record<string, unknown>;
+  const prefs: Record<string, unknown> = { ...DEFAULT_RECORDER_PREFS };
+  for (const [key, field] of Object.entries(RecorderPrefs.shape)) {
+    const parsed = field.safeParse(raw[key]);
+    if (parsed.success) prefs[key] = parsed.data;
+  }
+  return prefs as RecorderPrefs;
+}
+
 /** Anything unknown, including 'tr' from the Turkish-language app this one was forked from, reads as automatic. */
 function parseLanguage(value: unknown): AppSettings['language'] {
   return value === 'es' || value === 'en' ? value : 'auto';
@@ -39,6 +51,7 @@ export async function loadSettings(opts: { ephemeral?: boolean; language?: AppSe
       if (raw.language !== undefined) settings = { ...settings, language: parseLanguage(raw.language) };
       const folder = (raw as { lastExportFolder?: unknown }).lastExportFolder;
       if (typeof folder === 'string' && isAbsolute(folder)) lastExportFolder = folder;
+      recorder = parseRecorderPrefs((raw as { recorder?: unknown }).recorder);
     } catch { /* first run: defaults */ }
   }
   lang = resolveLang(settings.language, systemLocales());
@@ -55,7 +68,17 @@ export async function updateSettings(patch: Partial<AppSettings>): Promise<Setti
 
 async function persist(): Promise<void> {
   if (ephemeral) return;
-  await writeFileAtomic(file(), JSON.stringify({ ...settings, ...(lastExportFolder ? { lastExportFolder } : {}) }, null, 2));
+  await writeFileAtomic(file(), JSON.stringify({ ...settings, recorder, ...(lastExportFolder ? { lastExportFolder } : {}) }, null, 2));
+}
+
+export function recorderPrefs(): RecorderPrefs {
+  return recorder;
+}
+
+export async function updateRecorderPrefs(patch: Partial<RecorderPrefs>): Promise<RecorderPrefs> {
+  recorder = { ...recorder, ...patch };
+  await persist();
+  return recorder;
 }
 
 export function getLastExportFolder(): string | null {

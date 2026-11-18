@@ -1,7 +1,8 @@
 import type {
-  AppInfo, BackendInfo, CaptureConfig, CaptureResult, CaptureState, OpenedProject, PermissionInfo, ProjectSummary, RecoveryNotice, SourceInfo, ImportedVideo, PickedFile, ThirdPartyInfo, ExportTarget, EncoderInfo,
+  AppInfo, BackendInfo, CaptureConfig, CaptureResult, CaptureState, OpenedProject, PermissionInfo, ProjectSummary, RecoveryNotice, SourceInfo, ImportedVideo, PickedFile, ThirdPartyInfo, ExportTarget, EncoderInfo, RecorderPrefs,
 } from '@momotombo/protocol';
 import type { LangSetting, SettingsInfo } from '../shared/i18n';
+import type { DiskEstimate } from '../shared/recording-budget';
 
 interface Bridge {
   invoke(channel: string, payload?: unknown): Promise<unknown>;
@@ -48,6 +49,9 @@ export const api = {
   sources: () => call<SourceInfo[]>('capture:sources'),
   captureState: () => call<CaptureState>('capture:state'),
   startCapture: (config: CaptureConfig) => call<void>('capture:start', config),
+  diskEstimate: (config: CaptureConfig) => call<DiskEstimate>('capture:diskEstimate', config),
+  recorderPrefs: () => call<RecorderPrefs>('recorder:prefs'),
+  setRecorderPrefs: (patch: Partial<RecorderPrefs>) => call<RecorderPrefs>('recorder:setPrefs', patch),
   pauseCapture: () => call<void>('capture:pause'),
   resumeCapture: () => call<void>('capture:resume'),
   markCapture: () => call<void>('capture:mark'),

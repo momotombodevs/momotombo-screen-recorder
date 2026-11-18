@@ -4,7 +4,7 @@ body { font: 500 13px/1 var(--font-ui); color: var(--text); -webkit-font-smoothi
 .no-drag { -webkit-app-region: no-drag; }
 .mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 .hud {
-  margin: 6px; height: 52px; display: flex; align-items: center; gap: 8px; padding: 0 8px 0 16px;
+  width: fit-content; margin: 6px auto; height: 52px; display: flex; align-items: center; gap: 8px; padding: 0 8px 0 16px;
   border-radius: 26px; background: linear-gradient(180deg, rgba(28, 28, 28, 0.95), rgba(14, 14, 14, 0.96)); border: 1px solid rgba(235, 235, 235, 0.12);
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.09);
 }
@@ -12,8 +12,15 @@ body { font: 500 13px/1 var(--font-ui); color: var(--text); -webkit-font-smoothi
 .hud.is-paused .rec-dot { animation: none; background: var(--accent); }
 @keyframes blink { 50% { opacity: 0.35; } }
 .time { font-size: 15px; min-width: 50px; }
-.level { width: 46px; height: 4px; border-radius: 4px; background: rgba(235, 235, 235, 0.12); overflow: hidden; }
-.level span { display: block; height: 100%; background: var(--success); transform-origin: left; transition: transform 80ms linear; }
+.level-wrap, .level-status { display: inline-flex; align-items: center; gap: 6px; }
+.level { position: relative; width: 46px; height: 4px; border-radius: 4px; background: rgba(235, 235, 235, 0.12); }
+.level-fill { position: absolute; inset: 0; border-radius: 4px; background: linear-gradient(90deg, var(--success), var(--warning) 80%, var(--record)); clip-path: inset(0 100% 0 0); transition: clip-path 200ms linear; }
+.level-hold { position: absolute; top: -2px; bottom: -2px; left: 0; width: 2px; margin-left: -1px; border-radius: 1px; background: var(--text); }
+.level-wrap.is-clipping .level { box-shadow: 0 0 0 1px var(--record); }
+.level-wrap.is-silent .level { box-shadow: 0 0 0 1px var(--warning); }
+.hud-badge { display: inline-flex; align-items: center; gap: 3px; height: 20px; padding: 0 7px; border-radius: 10px; font-size: 11px; font-weight: 600; white-space: nowrap; }
+.hud-badge.is-warning { color: var(--warning); background: rgba(255, 206, 0, 0.14); }
+.hud-badge.is-danger { color: var(--white); background: var(--record); }
 .sep { width: 1px; height: 22px; background: rgba(235, 235, 235, 0.12); margin: 0 2px; }
 .hud-btn { height: 36px; min-width: 36px; border: 0; border-radius: 18px; background: transparent; color: var(--text); display: inline-flex; align-items: center; justify-content: center; gap: 6px; cursor: pointer; }
 .hud-btn:hover:not(:disabled) { background: rgba(235, 235, 235, 0.09); }

@@ -499,8 +499,8 @@ export class WebCaptureBackend extends EventEmitter implements CaptureBackend {
     } else this.emit("error", err);
   }
 
-  onLevel(mic: number): void {
-    this.emit("level", mic);
+  onLevel(mic: number, peak: number): void {
+    this.emit("level", mic, peak);
   }
 
   // ─── Control ──────────────────────────────────────────────────────────────

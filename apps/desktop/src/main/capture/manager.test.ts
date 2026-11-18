@@ -79,7 +79,7 @@ afterEach(async () => {
   for (const m of managers.splice(0)) await m.cancel();
 });
 
-function setup(deps: { beforeRecording?: () => Promise<void> } = {}) {
+function setup(deps: { beforeRecording?: () => Promise<void>; diskFree?: (dir: string) => Promise<number> } = {}) {
   const store = {
     create: vi.fn(async () => ({ id: "p" })),
     mediaDir: vi.fn(async () => "/nonexistent-momotombo-dir"),
@@ -227,6 +227,87 @@ describe("CaptureManager: cancel while start() is awaiting", () => {
     expect(m.state.phase).toBe("idle");
     expect(backend.cancel.mock.calls.length).toBeGreaterThan(cancelsBefore);
     expect(internals.active).toBeNull();
+  });
+});
+
+describe("CaptureManager: disk space", () => {
+  const GB = 1024 ** 3;
+
+  it("refuses to start without room for even a short take, before any countdown", async () => {
+    const { m, backend, store } = setup({ diskFree: async () => 0.3 * GB });
+    await expect(m.start(config({ countdown: 3, projectId: undefined }))).rejects.toThrow(/espacio/);
+    expect(store.create).not.toHaveBeenCalled();
+    expect(backend.prepare).not.toHaveBeenCalled();
+    expect(m.state.phase).toBe("error");
+  });
+
+  it("starts when there is room", async () => {
+    const { m, backend } = setup({ diskFree: async () => 100 * GB });
+    await m.start(config());
+    expect(backend.start).toHaveBeenCalled();
+    expect(m.state.phase).toBe("recording");
+  });
+
+  it("estimates the minutes left for the configured quality", async () => {
+    const { m } = setup({ diskFree: async () => 100 * GB });
+    const high = await m.diskEstimate(config({ quality: "high", fps: 60 }));
+    const standard = await m.diskEstimate(config({ quality: "standard", fps: 30 }));
+    expect(high).toMatchObject({ level: "ok", freeBytes: 100 * GB });
+    expect(standard.minutesLeft!).toBeGreaterThan(high.minutesLeft!);
+  });
+
+  it("reports an unknown estimate when free space cannot be read, and still starts", async () => {
+    const { m, backend } = setup({ diskFree: async () => { throw new Error("no statfs"); } });
+    expect(await m.diskEstimate(config())).toEqual({ level: "unknown", freeBytes: null, minutesLeft: null });
+    await m.start(config());
+    expect(backend.start).toHaveBeenCalled();
+  });
+
+  it("stops by itself when the disk gets close to full while recording, and reports minutes left", async () => {
+    let free = 100 * GB;
+    const { m, backend } = setup({ diskFree: async () => free });
+    await m.start(config());
+    await sleep(300);
+    expect(m.state.diskMinutesLeft).toBeGreaterThan(30);
+    free = 0.55 * GB;
+    await sleep(300);
+    expect(backend.stop).toHaveBeenCalled();
+  });
+
+  it("stops a light take by 1.5 GB free at the latest", async () => {
+    let free = 100 * GB;
+    const { m, backend } = setup({ diskFree: async () => free });
+    await m.start(config({ quality: "standard", fps: 30 }));
+    free = 1.45 * GB;
+    await sleep(300);
+    expect(backend.stop).toHaveBeenCalled();
+  });
+});
+
+describe("CaptureManager: microphone peak", () => {
+  const GB = 1024 ** 3;
+
+  it("does not carry a countdown peak into the recording", async () => {
+    const { m, b, backend } = setup({ diskFree: async () => 100 * GB });
+    const prep = deferred();
+    backend.prepare.mockReturnValueOnce(prep.promise);
+    const p = m.start(config({ countdown: 1 }));
+    await sleep(20);
+    b.emit("level", 0.5, 1);
+    prep.resolve();
+    await p;
+    await sleep(300);
+    expect(m.state.phase).toBe("recording");
+    expect(m.state.micPeak).toBe(0);
+  });
+
+  it("reports the loudest sample between two updates while recording", async () => {
+    const { m, b } = setup({ diskFree: async () => 100 * GB });
+    await m.start(config());
+    b.emit("level", 0.1, 0.9);
+    b.emit("level", 0.1, 0.3);
+    await sleep(300);
+    expect(m.state.micPeak).toBe(0.9);
   });
 });
 

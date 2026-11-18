@@ -1,12 +1,39 @@
-import { StrictMode, useEffect, useState } from 'react';
+import { StrictMode, useEffect, useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import type { CaptureState } from '@momotombo/protocol';
 import { api } from './api';
 import { initI18n, t, useLang } from './i18n';
 import { Icon } from './ui/icons';
 import { keyLabel, RECORDING_KEYS } from './ui/keys';
+import { useMicMeter, type ReadingSource } from './use-mic-meter';
 import './styles/tokens.css';
 import './styles/hud.css';
+
+const LOW_DISK_MINUTES = 10;
+
+function stateReadings(): ReadingSource {
+  return (push) => api.onCaptureState((s) => {
+    if (s.hasMic && (s.phase === 'recording' || s.phase === 'paused')) push({ rms: s.micLevel, peak: s.micPeak });
+  });
+}
+
+function HudMeter() {
+  const source = useMemo(stateReadings, []);
+  const m = useMicMeter(source);
+  const label = m.silent ? t("El micrófono no capta sonido") : m.clipping ? t("El micrófono se satura") : t("Nivel del micrófono");
+  return (
+    <span className={`level-wrap${m.silent ? ' is-silent' : ''}${m.clipping ? ' is-clipping' : ''}`} title={label}>
+      <span className="level" ref={m.bar} role="meter" aria-label={t("Nivel del micrófono")} aria-valuemin={-60} aria-valuemax={0} aria-valuenow={-60}>
+        <span className="level-fill" ref={m.fill} />
+        <span className="level-hold" ref={m.hold} />
+      </span>
+      <span role="status" className="level-status">
+        {m.clipping && <span className="hud-badge is-danger" title={label}>{t("SAT")}</span>}
+        {m.silent && <span className="hud-badge is-warning" title={label}>{t("Sin sonido")}</span>}
+      </span>
+    </span>
+  );
+}
 
 function Hud() {
   useLang();
@@ -32,7 +59,17 @@ function Hud() {
     <div className={`hud drag${paused ? ' is-paused' : ''}`}>
       <span className="rec-dot" />
       <span className="time mono">{time}</span>
-      <span className="level" aria-label={t("Nivel del micrófono")}><span style={{ transform: `scaleX(${Math.max(0.04, s.micLevel)})` }} /></span>
+      {s.hasMic && <HudMeter />}
+      {s.droppedFrames > 0 && (
+        <span className="hud-badge is-warning" title={t("Se perdieron {n} fotogramas: el equipo no da abasto. Cierra otras apps o baja la calidad o los fps.", { n: s.droppedFrames })}>
+          <Icon name="warning" size={12} />{s.droppedFrames}
+        </span>
+      )}
+      {s.diskMinutesLeft !== null && s.diskMinutesLeft < LOW_DISK_MINUTES && (
+        <span className="hud-badge is-danger" title={t("Queda poco espacio en disco; la grabación se detendrá sola antes de llenarlo.")}>
+          {t("Disco: {n} min", { n: s.diskMinutesLeft })}
+        </span>
+      )}
       <span className="sep" />
       {paused
         ? <button type="button" className="hud-btn no-drag" onClick={() => void api.resumeCapture()} title={t("Reanudar ({key})", { key: keyLabel(RECORDING_KEYS.pause) })}><Icon name="play" size={16} /></button>

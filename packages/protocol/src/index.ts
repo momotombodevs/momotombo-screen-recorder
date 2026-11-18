@@ -36,6 +36,22 @@ export const CaptureConfig = z.object({
 });
 export type CaptureConfig = z.infer<typeof CaptureConfig>;
 
+/** The recording screen's last choices. */
+export const RecorderPrefs = z.object({
+  cameraOn: z.boolean(),
+  micOn: z.boolean(),
+  systemAudio: z.boolean(),
+  cameraDeviceId: z.string().max(512).nullable(),
+  micDeviceId: z.string().max(512).nullable(),
+  fps: z.union([z.literal(30), z.literal(60)]),
+  quality: z.enum(['standard', 'high', 'max']),
+  countdown: z.union([z.literal(0), z.literal(3), z.literal(5)]),
+});
+export type RecorderPrefs = z.infer<typeof RecorderPrefs>;
+export const DEFAULT_RECORDER_PREFS: RecorderPrefs = {
+  cameraOn: true, micOn: true, systemAudio: true, cameraDeviceId: null, micDeviceId: null, fps: 60, quality: 'high', countdown: 3,
+};
+
 export type CapturePhase = 'idle' | 'preparing' | 'countdown' | 'recording' | 'paused' | 'finishing' | 'error';
 
 export interface CaptureState {
@@ -43,9 +59,16 @@ export interface CaptureState {
   backend: 'native-macos' | 'native-windows' | 'web' | null;
   elapsedMs: number;
   countdown: number;
+  /** The session records a microphone. */
+  hasMic: boolean;
+  /** Linear RMS of the microphone, 0..1. */
   micLevel: number;
+  /** Largest microphone sample since the previous state, 0..1. */
+  micPeak: number;
   droppedFrames: number;
   diskFreeBytes: number | null;
+  /** Recording time the free space still allows at this session's bitrate. */
+  diskMinutesLeft: number | null;
   /** Camera/microphone are open, warmed up and owned by the recorder. */
   devicesReady: boolean;
   message?: string;
@@ -259,6 +282,8 @@ export const Schemas = {
   'projects:readText': z.object({ id: ProjectId, path: RelPath }),
   'projects:setThumbnail': z.object({ id: ProjectId, dataUrl: z.string().startsWith('data:image/jpeg;base64,').max(2_000_000) }),
   'capture:start': CaptureConfig,
+  'capture:diskEstimate': CaptureConfig,
+  'recorder:setPrefs': RecorderPrefs.partial().strict(),
   'permissions:request': z.object({ kind: z.enum(['camera', 'microphone', 'screen']) }),
   'permissions:openSettings': z.object({ kind: z.enum(['camera', 'microphone', 'screen', 'input']) }),
   'export:defaultTarget': ExportTargetRequest,
@@ -297,6 +322,6 @@ export const CaptureWorker = {
   started: z.object({ startedAtMs: z.number(), kinds: z.array(z.enum(['screen', 'camera', 'mic', 'system'])) }),
   ready: z.object({ cameraWarmupMs: z.number().min(0).max(60_000).nullable() }),
   busy: z.object({ device: z.enum(['camera', 'mic']) }),
-  level: z.object({ mic: z.number().min(0).max(1) }),
+  level: z.object({ mic: z.number().min(0).max(1), peak: z.number().min(0).max(1) }),
   failed: z.object({ message: z.string().max(2000) }),
 };
