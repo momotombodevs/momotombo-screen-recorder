@@ -71,6 +71,17 @@ void main() {
   outColor = c * mask * uOpacity;
 }`;
 
+/** For textures uploaded premultiplied (text): filtering them never darkens their edges. */
+export const PREMULTIPLIED_FS = /* glsl */ `#version 300 es
+precision highp float;
+in vec2 vUnit;
+uniform sampler2D uTex;
+uniform float uOpacity;
+out vec4 outColor;
+void main() {
+  outColor = texture(uTex, vUnit) * uOpacity;
+}`;
+
 export const SHADOW_FS = /* glsl */ `#version 300 es
 precision highp float;
 in vec2 vLocal;
