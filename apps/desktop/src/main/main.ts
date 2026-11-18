@@ -8,10 +8,12 @@ import {
   app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, nativeImage, powerSaveBlocker, shell, Tray, type IpcMainInvokeEvent, type OpenDialogOptions, type SaveDialogOptions,
 } from 'electron';
 import type { ZodType } from 'zod';
-import { CaptureWorker, IMPORT_VIDEO_TYPES, Schemas, type AppInfo, type Channel, type CpuSample, type EncoderInfo, type ExportTarget, type OpenedProject, type PickedFile, type ThirdPartyInfo } from '@momotombo/protocol';
+import { CaptureWorker, IMPORT_VIDEO_TYPES, Schemas, type AppInfo, type Channel, type CliExportJob, type CpuSample, type EncoderInfo, type ExportTarget, type OpenedProject, type PickedFile, type ThirdPartyInfo } from '@momotombo/protocol';
 import { newId, type Recording } from '@momotombo/project-model';
 import { APP_NAME, PROJECTS_FOLDER } from '../shared/brand';
 import { projectIdFromArgv } from '../shared/open-project';
+import { busyReason, exportRequestPathFromArgv, nextStatus, startStatus, type ExportStatus, type RefusalReason } from '../shared/export-request';
+import { completeFileProblem, loadExportRequest, writeStatus, writeStatusNow } from './cli-export';
 import { migrateLegacyData } from './legacy-name';
 import { CaptureManager } from './capture/manager';
 import { runCodecProbe } from './codec-probe';
@@ -75,11 +77,17 @@ let minimizedForCapture = false;
 let minimizedAt = 0;
 let pendingFinished: unknown = null;
 let pendingOpenProject = projectIdFromArgv(process.argv);
+const exportRequests: string[] = [];
+const startupExportRequest = exportRequestPathFromArgv(process.argv);
+if (startupExportRequest) exportRequests.push(startupExportRequest);
+let drainExportRequests: (() => void) | null = null;
+let failCliJobNow: ((error: string) => void) | null = null;
+let watchCliWindow: ((wc: Electron.WebContents) => void) | null = null;
 
-function openMainWindow(): BrowserWindow {
-  const win = createMainWindow(!SMOKE, SMOKE, icon);
+function openMainWindow(inactive = false): BrowserWindow {
+  const win = createMainWindow(!SMOKE && !inactive, SMOKE, icon);
   // Timing and interface tests need a window that is really drawn; it is shown without taking focus.
-  if (SUITE === 'perf' || SUITE === 'ui') win.once('ready-to-show', () => win.showInactive());
+  if (SUITE === 'perf' || SUITE === 'ui' || (inactive && !SMOKE)) win.once('ready-to-show', () => win.showInactive());
   win.on('closed', () => { if (mainWindow === win) mainWindow = null; });
   win.webContents.on('did-finish-load', () => {
     if (pendingFinished) {
@@ -87,6 +95,7 @@ function openMainWindow(): BrowserWindow {
       pendingFinished = null;
     }
   });
+  watchCliWindow?.(win.webContents);
   mainWindow = win;
   return win;
 }
@@ -366,6 +375,99 @@ function registerIpc(): void {
       releaseExport(exportId);
     }
   });
+  // Exports momotombo-edit asks for (shared/export-request.ts). The request file comes from any
+  // local process, so it is validated here and the renderer only ever gets a one-time target token.
+  let cliJob: { job: CliExportJob; dir: string; status: ExportStatus; taken: boolean } | null = null;
+  let cliStatusWrite: Promise<void> = Promise.resolve();
+  const saveCliStatus = (dir: string, status: ExportStatus) => {
+    cliStatusWrite = cliStatusWrite.then(() => writeStatus(dir, status)).catch((e: unknown) => { process.stderr.write(`Could not write the export status: ${String(e)}\n`); });
+    return cliStatusWrite;
+  };
+  const refuseCli = (dir: string, requestId: string, reason: RefusalReason, error: string) =>
+    saveCliStatus(dir, startStatus(requestId, new Date(), { state: 'refused', reason, error }));
+  const finishCli = (state: 'failed' | 'done', patch: Partial<ExportStatus>) => {
+    const current = cliJob;
+    if (!current) return;
+    cliJob = null;
+    const next = nextStatus(current.status, { ...current.status, ...patch, state }, new Date());
+    const wc = mainWindow?.webContents;
+    if (wc && !wc.isDestroyed() && ![...exporting.values()].includes(wc)) wc.setBackgroundThrottling(!SMOKE);
+    if (next) void saveCliStatus(current.dir, next);
+  };
+  failCliJobNow = (error: string) => {
+    if (!cliJob) return;
+    const next = nextStatus(cliJob.status, { ...cliJob.status, state: 'failed', error }, new Date());
+    if (next) writeStatusNow(cliJob.dir, next);
+    cliJob = null;
+  };
+  const acceptExportRequest = async (path: string) => {
+    const loaded = await loadExportRequest(path, {
+      root: store.root,
+      dirOf: async (id) => (await store.entries()).find((e) => e.id === id)?.dir ?? null,
+    });
+    if (!loaded.ok) {
+      process.stderr.write(`Export request refused: ${loaded.error}\n`);
+      if (loaded.dir && loaded.requestId) await refuseCli(loaded.dir, loaded.requestId, 'invalid-request', loaded.error);
+      return;
+    }
+    const { request, dir, out } = loaded;
+    const busy = busyReason({ capturePhase: capture.state.phase, exportsRunning: exportsWriter.pending + mfExports.pending, jobActive: cliJob !== null });
+    if (busy) { await refuseCli(dir, request.requestId, busy.reason, busy.error); return; }
+    let json: unknown;
+    try {
+      json = await store.read(request.projectId);
+    } catch (e) {
+      await refuseCli(dir, request.requestId, 'invalid-request', `The project cannot be read: ${(e as Error).message}`);
+      return;
+    }
+    const { requestId, projectId, format, variantId, resolution, fps, quality, includeAudio } = request;
+    cliJob = {
+      dir, taken: false, status: startStatus(requestId, new Date()),
+      job: {
+        requestId, opened: { id: projectId, json, mediaBase: mediaBase(projectId), dir },
+        choices: { format, variantId, resolution, fps, quality, includeAudio },
+        target: out ? issueTarget(out, false, true) : null,
+      },
+    };
+    await saveCliStatus(dir, cliJob.status);
+    const win = mainWindow && !mainWindow.isDestroyed() ? mainWindow : openMainWindow(true);
+    win.webContents.setBackgroundThrottling(false);
+    if (!win.isVisible() && !win.isMinimized()) win.showInactive();
+    broadcast('export:cliRequest', null);
+  };
+  drainExportRequests = () => {
+    for (const path of exportRequests.splice(0)) void acceptExportRequest(path).catch((e: unknown) => process.stderr.write(`Export request failed: ${String(e)}\n`));
+  };
+  handleNoArgs('export:takeCliJob', (e): CliExportJob | null => {
+    if (!cliJob || cliJob.taken || e.sender !== mainWindow?.webContents) return null;
+    cliJob.taken = true;
+    return cliJob.job;
+  });
+  handle('export:cliReport', async (report, e) => {
+    if (!cliJob || report.requestId !== cliJob.job.requestId || e.sender !== mainWindow?.webContents) return;
+    if (report.state === 'refused') {
+      const { dir } = cliJob;
+      cliJob = null;
+      await refuseCli(dir, report.requestId, report.reason ?? 'invalid-request', report.error ?? 'Refused.');
+      return;
+    }
+    if (report.state === 'done') {
+      const problem = await completeFileProblem(report.outFile, report.bytes);
+      finishCli(problem ? 'failed' : 'done', problem ? { error: problem, outFile: report.outFile } : { outFile: report.outFile, bytes: report.bytes, phase: 'done' });
+      return;
+    }
+    if (report.state === 'failed') { finishCli('failed', { error: report.error, phase: report.phase, progress: report.progress }); return; }
+    const next = nextStatus(cliJob.status, report, new Date());
+    if (!next) return;
+    cliJob.status = next;
+    await saveCliStatus(cliJob.dir, next);
+  });
+  const failCliOnWindowLoss = (wc: Electron.WebContents) => {
+    const fail = () => { if (cliJob?.taken) finishCli('failed', { error: 'The Momotombo window closed during the export.' }); };
+    wc.once('destroyed', fail);
+    wc.on('render-process-gone', fail);
+  };
+  watchCliWindow = failCliOnWindowLoss;
   handle('shell:showItem', ({ path }) => shell.showItemInFolder(path));
   handleNoArgs('settings:get', () => settingsInfo());
 
@@ -669,7 +771,8 @@ async function boot(): Promise<void> {
   // Cancelled or failed sessions bring the window back too.
   capture.on('state', (s) => { if ((s.phase === 'error' || s.phase === 'idle') && minimizedForCapture) restoreMain(); });
   registerIpc();
-  openMainWindow();
+  openMainWindow(startupExportRequest !== null);
+  drainExportRequests?.();
   // Recordings left behind by a recorder or app that stopped mid-recording.
   if (!SMOKE) void capture.recoverAbandoned().catch((e) => process.stderr.write(`Recovery scan failed: ${String(e)}\n`));
   if (SMOKE) {
@@ -684,6 +787,12 @@ async function boot(): Promise<void> {
 }
 
 app.on('second-instance', (_event, argv) => {
+  const exportRequest = exportRequestPathFromArgv(argv);
+  if (exportRequest) {
+    exportRequests.push(exportRequest);
+    drainExportRequests?.();
+    return;
+  }
   const id = projectIdFromArgv(argv);
   if (id) requestOpenProject(id);
   restoreMain();
@@ -713,6 +822,7 @@ app.on('activate', () => {
 let exportsCancelled = false;
 app.on('will-quit', (e) => {
   globalShortcut.unregisterAll();
+  failCliJobNow?.('Momotombo quit during the export.');
   if (exportsCancelled || exportsWriter.pending + mfExports.pending === 0) return;
   e.preventDefault();
   exportsCancelled = true;

@@ -564,4 +564,5 @@ export const EN: Record<string, string> = {
   "Grabar el micrófono": "Record microphone",
   "Grabar el audio del sistema": "Record system audio",
   "Formato": "Format",
+  "Exportación pedida por momotombo-edit": "Export requested by momotombo-edit",
 };

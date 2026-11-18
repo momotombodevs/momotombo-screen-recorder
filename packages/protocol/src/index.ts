@@ -272,6 +272,34 @@ export const ExportWrite = z.object({
   data: z.instanceof(Uint8Array),
 });
 
+/** An export momotombo-edit asked for: validated by main, run by the main window. */
+export interface CliExportJob {
+  requestId: string;
+  opened: OpenedProject;
+  choices: {
+    variantId?: string;
+    format: 'mp4' | 'webm';
+    resolution?: '1080' | '2160';
+    fps?: 30 | 60;
+    quality?: 'standard' | 'high';
+    includeAudio?: boolean;
+  };
+  /** Null: main's default export folder, as in the export window. */
+  target: ExportTarget | null;
+}
+
+export const CliExportReport = z.object({
+  requestId: z.string().regex(/^xr_[0-9a-f]{16}$/),
+  state: z.enum(['running', 'done', 'failed', 'refused']),
+  progress: z.number().min(0).max(1),
+  phase: z.string().max(40).nullable(),
+  outFile: z.string().max(4096).nullable(),
+  bytes: z.number().int().min(0).nullable(),
+  error: z.string().max(4000).nullable(),
+  reason: z.literal('editing-other-project').nullable(),
+});
+export type CliExportReport = z.infer<typeof CliExportReport>;
+
 export const Schemas = {
   'projects:create': z.object({ name: z.string().min(1).max(200) }),
   'projects:open': z.object({ id: ProjectId }),
@@ -293,6 +321,7 @@ export const Schemas = {
   'export:mfBegin': ExportMfBegin,
   'export:mfWrite': ExportMfWrite,
   'export:write': ExportWrite,
+  'export:cliReport': CliExportReport,
   'export:end': z.object({ exportId: z.string().min(8).max(80), cancel: z.boolean().default(false) }),
   'shell:showItem': z.object({ path: z.string().min(1).max(4096) }),
   'settings:set': z.object({ language: z.enum(['auto', 'es', 'en']) }),
