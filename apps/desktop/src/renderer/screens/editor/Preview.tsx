@@ -426,7 +426,8 @@ export function Preview({ store, player }: { store: EditorStore; player: Player 
     ? [...textBoxesRef.current].map(([id, r]) => {
       const a = toCss({ x: r.x, y: r.y });
       const b = toCss({ x: r.x + r.w, y: r.y + r.h });
-      return { id, label: project.texts.find((x) => x.id === id)?.text ?? '', left: a.x, top: a.y, width: b.x - a.x, height: b.y - a.y };
+      const text = project.texts.find((x) => x.id === id)?.text.replace(/\s+/g, ' ').trim() ?? '';
+      return { id, label: text.length > 60 ? `${text.slice(0, 59)}…` : text, left: a.x, top: a.y, width: b.x - a.x, height: b.y - a.y };
     })
     : [];
 
@@ -491,7 +492,12 @@ export function Preview({ store, player }: { store: EditorStore; player: Player 
             <div key={b.id} className={`text-box${selection?.kind === 'text' && selection.id === b.id ? ' is-selected' : ''}`}
               style={{ left: b.left, top: b.top, width: b.width, height: b.height }}
               role="button" tabIndex={0} aria-label={t("Texto: {text}", { text: b.label })} title={t("Arrastra para mover el texto")}
-              onFocus={() => store.select({ kind: 'text', id: b.id })}
+              onKeyDown={(e) => {
+                if (e.key !== 'Enter' && e.key !== ' ') return;
+                e.preventDefault();
+                e.stopPropagation();
+                store.select({ kind: 'text', id: b.id });
+              }}
               onPointerDown={(e) => startTextDrag(e, b.id)} />
           ))}
           {selBox && (

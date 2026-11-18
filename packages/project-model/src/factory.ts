@@ -185,7 +185,7 @@ export const TEXT_PRESETS: Record<TextPresetId, TextLook> = {
   },
   'lower-third': {
     position: { x: 0.06, y: 0.88 }, anchor: 'bottom-left', align: 'left', fontSize: 0.045, fontWeight: 600, color: '#FFFFFF', maxWidth: 0.6,
-    background: { color: '#111318', opacity: 0.82, padding: 0.55, radius: 0.3 }, enter: anim('slide-right', 0.45), exit: anim('fade', 0.3),
+    background: { color: '#C2410C', opacity: 0.95, padding: 0.55, radius: 0.3 }, enter: anim('slide-right', 0.45), exit: anim('fade', 0.3),
   },
   caption: {
     position: { x: 0.5, y: 0.93 }, anchor: 'bottom', align: 'center', fontSize: 0.042, fontWeight: 500, color: '#FFFFFF', maxWidth: 0.84,

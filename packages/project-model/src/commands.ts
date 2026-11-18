@@ -1,5 +1,5 @@
 import { frameDuration, type Ticks } from '@momotombo/timing';
-import { newId } from './factory';
+import { TEXT_PRESETS, newId, type TextPresetId } from './factory';
 import { layoutSegments, timelineToSource } from './mapping';
 import type {
   AudioMix, CameraLayoutItem, ID, MagnifierItem, PrivacyItem, Project, SourceKind, Style, TextItem, Variant, ZoomItem,
@@ -153,6 +153,38 @@ export function addText(project: Project, item: NewText): { project: Project; id
 }
 export const updateText = (p: Project, id: ID, patch: DeepPartial<TextItem>) => patchItem(p, 'texts', id, patch, true);
 export const removeText = (p: Project, id: ID) => removeItem(p, 'texts', id);
+
+const OPTIONAL_TEXT_LOOK = ['background', 'stroke', 'shadow'] as const;
+type OptionalTextLook = (typeof OPTIONAL_TEXT_LOOK)[number];
+
+/** `null` removes background, stroke or shadow; a partial one is merged onto the current one. */
+export type TextLookPatch = Omit<DeepPartial<TextItem>, OptionalTextLook | 'id' | 'type' | 'recordingId' | 'start' | 'end' | 'origin'>
+  & { [K in OptionalTextLook]?: Partial<NonNullable<TextItem[K]>> | null };
+
+export function updateTextLook(p: Project, id: ID, patch: TextLookPatch): Project {
+  const { background, stroke, shadow, ...rest } = patch;
+  const optional = { background, stroke, shadow };
+  const next = updateText(p, id, rest as DeepPartial<TextItem>);
+  return {
+    ...next,
+    texts: next.texts.map((item) => {
+      if (item.id !== id) return item;
+      const out: TextItem = { ...item };
+      for (const key of OPTIONAL_TEXT_LOOK) {
+        const value = optional[key];
+        if (value === null) delete out[key];
+        else if (value) Object.assign(out, { [key]: { ...item[key], ...value } });
+      }
+      return out;
+    }),
+  };
+}
+
+/** Gives a text a preset's look; its words, timing and place on the canvas stay. */
+export function applyTextPreset(p: Project, id: ID, preset: TextPresetId): Project {
+  const { position: _position, ...look } = TEXT_PRESETS[preset];
+  return updateTextLook(p, id, { background: null, stroke: null, shadow: null, ...look });
+}
 
 /**
  * Replaces the automatic zoom suggestions of a recording. Items the user edited

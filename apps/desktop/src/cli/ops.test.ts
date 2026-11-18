@@ -493,7 +493,7 @@ describe('text ops', () => {
     expect(results.map((r) => r.placed)).toEqual([{ start: 1, end: 4 }, { start: 2, end: 6 }]);
     const [title, lower] = describeProject(project).texts;
     expect(title).toMatchObject({ id: results[0]!.id, text: 'Momotombo', anchor: 'center', fontWeight: 800, enter: { kind: 'pop', duration: 0.5 }, shown: [{ start: 1, end: 4 }] });
-    expect(lower).toMatchObject({ anchor: 'bottom-left', background: { color: '#111318' }, enter: { kind: 'slide-right', duration: 0.45 } });
+    expect(lower).toMatchObject({ anchor: 'bottom-left', background: { color: '#C2410C' }, enter: { kind: 'slide-right', duration: 0.45 } });
     expect(() => validatedProjectText(project)).not.toThrow();
   });
 
@@ -539,7 +539,7 @@ describe('text ops', () => {
     const [t] = texts([
       { op: 'updateItem', track: 'texts', id, patch: { text: 'Adiós', position: { y: 0.5 }, background: { opacity: 0.4 }, exit: { duration: 1 } } },
     ], added.project);
-    expect(t).toMatchObject({ text: 'Adiós', position: { x: 0.06, y: 0.5 }, background: { color: '#111318', opacity: 0.4 }, exit: { kind: 'fade', duration: 1 } });
+    expect(t).toMatchObject({ text: 'Adiós', position: { x: 0.06, y: 0.5 }, background: { color: '#C2410C', opacity: 0.4 }, exit: { kind: 'fade', duration: 1 } });
     const dropped = apply([{ op: 'updateItem', track: 'texts', id, patch: { background: null } }], added.project);
     expect(dropped.texts[0]).not.toHaveProperty('background');
     expect(() => apply([{ op: 'updateItem', track: 'texts', id, patch: { background: { opacity: 0.5 } } }], dropped)).toThrow(/give all of color, opacity, padding, radius/);
