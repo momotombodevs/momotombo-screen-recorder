@@ -3,11 +3,11 @@ import { Compositor } from '@momotombo/compositor';
 import {
   activeVariant, addCameraMoveAt, cameraFrameFor, cameraSecondLayout, canvasToSource, clampRectTo01, conflictsFor, evaluate,
   layoutSegments, normalizeRect, privacyRegionAt, setCameraMovePosition, sourceToCanvas, suggestedSecondPosition, timelineToSource,
-  updateCameraLayout, updatePrivacy, updateVariant, updateZoom, setStyle, type Rect, type RenderPlan, type Vec2,
+  updateCameraLayout, updatePrivacy, updateText, updateVariant, updateZoom, setStyle, type ID, type Rect, type RenderPlan, type Vec2,
 } from '@momotombo/project-model';
 import { secondsToTicks } from '@momotombo/timing';
 import type { Player } from '../../playback/player';
-import { addMagnifierAt, place } from './placement';
+import { addMagnifierAt, addTextAt, place } from './placement';
 import { placeName } from './camera-names';
 import { useEditor, type EditorStore } from '../../state/editor-store';
 import { t } from '../../i18n';
@@ -20,7 +20,8 @@ type Drag =
   | { kind: 'privacy'; id: string; mode: 'move' | 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw'; origin: Vec2; region: Rect }
   | { kind: 'camera'; origin: Vec2; position: Vec2; target: 'item' | 'variant' | 'style'; itemId?: string }
   | { kind: 'pos'; id: string; which: 1 | 2; offset: Vec2 }
-  | { kind: 'possize'; id: string; which: 1 | 2; center: Vec2; dist0: number; size0: number };
+  | { kind: 'possize'; id: string; which: 1 | 2; center: Vec2; dist0: number; size0: number }
+  | { kind: 'text'; id: string; origin: Vec2; position: Vec2 };
 
 interface CamShape { rect: Rect; radius: number; cornerExponent: number }
 
@@ -34,6 +35,7 @@ export function Preview({ store, player }: { store: EditorStore; player: Player 
   const [glGeneration, setGlGeneration] = useState(0);
   const compRef = useRef<Compositor | null>(null);
   const planRef = useRef<RenderPlan | null>(null);
+  const textBoxesRef = useRef<ReadonlyMap<ID, Rect>>(new Map());
   const [box, setBox] = useState<Box>({ x: 0, y: 0, w: 0, h: 0 });
   const [error, setError] = useState<string | null>(null);
   const [drag, setDrag] = useState<Drag | null>(null);
@@ -102,11 +104,6 @@ export function Preview({ store, player }: { store: EditorStore; player: Player 
     const t0 = probe.on ? performance.now() : 0;
     const plan = evaluate(s.project, s.playhead, { cursors: s.cursors, size: { width, height } });
     planRef.current = plan;
-    const key = JSON.stringify([plan.camera?.rect, plan.screen?.frame, plan.screen?.viewport, plan.sourceTime]);
-    if (key !== overlayKey.current) {
-      overlayKey.current = key;
-      if (s.tool === 'camera' || s.selection?.kind === 'privacy' || s.selection?.kind === 'camera') setOverlayVersion((v) => v + 1);
-    }
     const m = plan.recordingId ? player.elementsFor(plan.recordingId) : undefined;
     const screen = m?.screen && m.screen.readyState >= 2 ? m.screen : null;
     const camera = m?.camera && m.camera.readyState >= 2 ? m.camera : null;
@@ -117,6 +114,13 @@ export function Preview({ store, player }: { store: EditorStore; player: Player 
       });
     } catch (e) {
       setError((e as Error).message);
+    }
+    textBoxesRef.current = comp.textBoxes;
+    const texts = [...comp.textBoxes].map(([id, r]) => [id, Math.round(r.x), Math.round(r.y), Math.round(r.w), Math.round(r.h)]);
+    const key = JSON.stringify([plan.camera?.rect, plan.screen?.frame, plan.screen?.viewport, plan.sourceTime, texts]);
+    if (key !== overlayKey.current) {
+      overlayKey.current = key;
+      if (s.tool === 'camera' || s.tool === 'text' || s.tool === 'select' || s.selection?.kind === 'privacy' || s.selection?.kind === 'camera') setOverlayVersion((v) => v + 1);
     }
     if (probe.on) probe.record('preview-draw', performance.now() - t0);
   }, [box, player, store, variant.width]);
@@ -264,6 +268,10 @@ export function Preview({ store, player }: { store: EditorStore; player: Player 
       setDrag({ kind: 'draw', start: p, current: p });
       return;
     }
+    if (s.tool === 'text') {
+      addTextAt(store, s.playhead, canvasPos(p));
+      return;
+    }
     if (s.tool === 'magnifier') {
       // Works at the playhead like the zoom tool: adds a range there or selects the one already there.
       addMagnifierAt(store, s.playhead);
@@ -321,6 +329,14 @@ export function Preview({ store, player }: { store: EditorStore; player: Player 
     if (drag.kind === 'possize') {
       const k = Math.hypot(p.x - drag.center.x, p.y - drag.center.y) / drag.dist0;
       setPos(drag.id, drag.which, { size: Math.min(0.95, Math.max(0.08, drag.size0 * k)) });
+      return;
+    }
+    if (drag.kind === 'text') {
+      const position = {
+        x: Math.min(1, Math.max(0, drag.position.x + (p.x - drag.origin.x) / box.w)),
+        y: Math.min(1, Math.max(0, drag.position.y + (p.y - drag.origin.y) / box.h)),
+      };
+      store.apply((pr) => updateText(pr, drag.id, { position }), { coalesce: `txt-drag-${drag.id}` });
       return;
     }
     if (drag.kind === 'camera') {
@@ -395,6 +411,25 @@ export function Preview({ store, player }: { store: EditorStore; player: Player 
     setDrag({ kind: 'privacy', id: activePrivacy.id, mode, origin: { x: e.clientX - r.left, y: e.clientY - r.top }, region: privacyRegionAt(activePrivacy, plan.sourceTime) });
   };
 
+  const startTextDrag = (e: RPointerEvent, id: string) => {
+    if (e.button !== 0) return;
+    const item = store.project.texts.find((x) => x.id === id);
+    if (!item) return;
+    e.stopPropagation();
+    store.select({ kind: 'text', id });
+    const overlay = (e.currentTarget as HTMLElement).closest('.preview-overlay') as HTMLElement;
+    overlay.setPointerCapture(e.pointerId);
+    const r = overlay.getBoundingClientRect();
+    setDrag({ kind: 'text', id, origin: { x: e.clientX - r.left, y: e.clientY - r.top }, position: item.position });
+  };
+  const textBoxes = tool === 'select' || tool === 'text'
+    ? [...textBoxesRef.current].map(([id, r]) => {
+      const a = toCss({ x: r.x, y: r.y });
+      const b = toCss({ x: r.x + r.w, y: r.y + r.h });
+      return { id, label: project.texts.find((x) => x.id === id)?.text ?? '', left: a.x, top: a.y, width: b.x - a.x, height: b.y - a.y };
+    })
+    : [];
+
   const drawBox = drag?.kind === 'draw'
     ? { x: Math.min(drag.start.x, drag.current.x), y: Math.min(drag.start.y, drag.current.y), w: Math.abs(drag.current.x - drag.start.x), h: Math.abs(drag.current.y - drag.start.y) }
     : null;
@@ -452,6 +487,13 @@ export function Preview({ store, player }: { store: EditorStore; player: Player 
             );
           })()}
           {drawBox && <div className="draw-box" style={{ left: drawBox.x, top: drawBox.y, width: drawBox.w, height: drawBox.h }} />}
+          {textBoxes.map((b) => (
+            <div key={b.id} className={`text-box${selection?.kind === 'text' && selection.id === b.id ? ' is-selected' : ''}`}
+              style={{ left: b.left, top: b.top, width: b.width, height: b.height }}
+              role="button" tabIndex={0} aria-label={t("Texto: {text}", { text: b.label })} title={t("Arrastra para mover el texto")}
+              onFocus={() => store.select({ kind: 'text', id: b.id })}
+              onPointerDown={(e) => startTextDrag(e, b.id)} />
+          ))}
           {selBox && (
             <div className="privacy-box" style={{ left: selBox.x, top: selBox.y, width: selBox.w, height: selBox.h }} onPointerDown={(e) => startPrivacyDrag(e, 'move')}>
               {HANDLES.map((h) => <span key={h} className={`handle h-${h}`} onPointerDown={(e) => startPrivacyDrag(e, h)} />)}

@@ -13,6 +13,7 @@ import { useEditor, type EditorStore, type InspectorTab } from '../../state/edit
 import { Button, ColorInput, Section, Segmented, Select, Slider, Swatch, Toggle } from '../../ui/controls';
 import { Icon } from '../../ui/icons';
 import { addMagnifierAt, place } from './placement';
+import { TextPanel } from './TextPanel';
 import { PLACE_GRID, placeName } from './camera-names';
 import { clearZoomSuggestions, noSuggestionMessage, runZoomSuggestions, type ZoomRun } from './zoom-actions';
 import { t } from '../../i18n';
@@ -150,6 +151,11 @@ function SelectedPanel({ store, player }: { store: EditorStore; player: Player }
         <Button icon="trash" variant="ghost" size="sm" onClick={() => store.apply((p) => removeMagnifier(p, it.id))}>{t("Eliminar lupa")}</Button>
       </div>
     );
+  }
+
+  if (selection.kind === 'text') {
+    const it = project.texts.find((i) => i.id === selection.id);
+    return it ? <TextPanel key={it.id} store={store} item={it} onClose={close} /> : null;
   }
 
   if (selection.kind === 'privacy') {

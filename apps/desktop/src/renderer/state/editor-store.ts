@@ -24,6 +24,7 @@ export type SelectionKind =
   | "privacy"
   | "camera"
   | "magnifier"
+  | "text"
   | "segment";
 export interface Selection {
   kind: SelectionKind;
@@ -36,7 +37,8 @@ export type Tool =
   | "zoom"
   | "cut"
   | "camera"
-  | "magnifier";
+  | "magnifier"
+  | "text";
 export type InspectorTab =
   | "style"
   | "camera"
@@ -180,6 +182,8 @@ export class EditorStore {
         return p.cameraLayouts.some((z) => z.id === s.id);
       case "magnifier":
         return p.magnifiers.some((z) => z.id === s.id);
+      case "text":
+        return p.texts.some((z) => z.id === s.id);
       case "segment":
         return p.sequence.segments.some((z) => z.id === s.id);
     }
