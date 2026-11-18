@@ -8,10 +8,12 @@ import {
   app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, nativeImage, powerSaveBlocker, shell, Tray, type IpcMainInvokeEvent, type OpenDialogOptions, type SaveDialogOptions,
 } from 'electron';
 import type { ZodType } from 'zod';
-import { CaptureWorker, IMPORT_VIDEO_TYPES, Schemas, type AppInfo, type Channel, type CpuSample, type EncoderInfo, type ExportTarget, type OpenedProject, type PickedFile, type ThirdPartyInfo } from '@momotombo/protocol';
+import { CaptureWorker, IMPORT_VIDEO_TYPES, Schemas, type AppInfo, type Channel, type CliExportJob, type CpuSample, type EncoderInfo, type ExportTarget, type OpenedProject, type PickedFile, type ThirdPartyInfo } from '@momotombo/protocol';
 import { newId, type Recording } from '@momotombo/project-model';
 import { APP_NAME, PROJECTS_FOLDER } from '../shared/brand';
 import { projectIdFromArgv } from '../shared/open-project';
+import { exportRequestPathFromArgv, quitAfterCliJob } from '../shared/export-request';
+import { CliExports } from './cli-export';
 import { migrateLegacyData } from './legacy-name';
 import { CaptureManager } from './capture/manager';
 import { runCodecProbe } from './codec-probe';
@@ -75,11 +77,20 @@ let minimizedForCapture = false;
 let minimizedAt = 0;
 let pendingFinished: unknown = null;
 let pendingOpenProject = projectIdFromArgv(process.argv);
+const exportRequests: string[] = [];
+const startupExportRequest = exportRequestPathFromArgv(process.argv);
+if (startupExportRequest) exportRequests.push(startupExportRequest);
+let drainExportRequests: (() => void) | null = null;
+let exportAcceptsInFlight = 0;
+let userInteracted = false;
+const markInteracted = () => { userInteracted = true; };
+let failCliJobNow: ((error: string) => void) | null = null;
+let watchCliWindow: ((wc: Electron.WebContents) => void) | null = null;
 
-function openMainWindow(): BrowserWindow {
-  const win = createMainWindow(!SMOKE, SMOKE, icon);
+function openMainWindow(inactive = false): BrowserWindow {
+  const win = createMainWindow(!SMOKE && !inactive, SMOKE, icon);
   // Timing and interface tests need a window that is really drawn; it is shown without taking focus.
-  if (SUITE === 'perf' || SUITE === 'ui') win.once('ready-to-show', () => win.showInactive());
+  if (SUITE === 'perf' || SUITE === 'ui' || (inactive && !SMOKE)) win.once('ready-to-show', () => win.showInactive());
   win.on('closed', () => { if (mainWindow === win) mainWindow = null; });
   win.webContents.on('did-finish-load', () => {
     if (pendingFinished) {
@@ -87,6 +98,9 @@ function openMainWindow(): BrowserWindow {
       pendingFinished = null;
     }
   });
+  watchCliWindow?.(win.webContents);
+  win.on('focus', markInteracted);
+  win.webContents.on('before-input-event', markInteracted);
   mainWindow = win;
   return win;
 }
@@ -336,6 +350,7 @@ function registerIpc(): void {
     if (!target.path.toLowerCase().endsWith('.mp4')) throw new Error(tm("La ubicación para guardar ya no es válida. Vuelve a elegirla."));
     const r = await mfExports.begin(target.path, { overwrite: target.overwrite }, { width, height, fps, bitrate, audio });
     await watchExport(r.exportId, e.sender);
+    cli.noteBegin(token, r.exportId);
     return r;
   });
   handle('export:mfWrite', ({ exportId, kind, time, duration, data }) => mfExports.write(exportId, kind, time, duration, data));
@@ -343,6 +358,7 @@ function registerIpc(): void {
     const target = exportTargets.take(token);
     if (!target) throw new Error(tm("La ubicación para guardar ya no es válida. Vuelve a elegirla."));
     const r = await exportsWriter.begin(target.path, { overwrite: target.overwrite });
+    cli.noteBegin(token, r.exportId);
     const wc = e.sender;
     if (wc.isDestroyed()) {
       await exportsWriter.end(r.exportId, true);
@@ -361,11 +377,70 @@ function registerIpc(): void {
   handle('export:write', ({ exportId, position, data }) => exportsWriter.write(exportId, position, data));
   handle('export:end', async ({ exportId, cancel }) => {
     try {
-      return await endExport(exportId, cancel);
+      const result = await endExport(exportId, cancel);
+      cli.noteEnd(exportId, result);
+      return result;
     } finally {
       releaseExport(exportId);
     }
   });
+  // Exports momotombo-edit asks for (shared/export-request.ts). The request file comes from any
+  // local process, so it is validated here and the renderer only ever gets a one-time target token.
+  const isMainWindow = (e: IpcMainInvokeEvent) => e.sender === mainWindow?.webContents;
+  const cli = new CliExports({
+    root: store.root,
+    projectDirs: () => store.entries(),
+    readProject: (id) => store.read(id),
+    busy: () => ({ capturePhase: capture.state.phase, exportsRunning: exportsWriter.pending + mfExports.pending }),
+    issueTarget: (path) => issueTarget(path, false, true),
+    defaultTarget: async (projectId, baseName, extension) =>
+      issueTarget(await uniquePath(await defaultExportFolder(projectId), safeBaseName(baseName), extension), false, false),
+    mediaBase,
+    showJob: () => {
+      const win = mainWindow && !mainWindow.isDestroyed() ? mainWindow : openMainWindow(true);
+      win.webContents.setBackgroundThrottling(false);
+      if (!win.isVisible() && !win.isMinimized()) win.showInactive();
+      broadcast('export:cliRequest', null);
+    },
+    restoreThrottling: () => {
+      const wc = mainWindow?.webContents;
+      if (wc && !wc.isDestroyed() && ![...exporting.values()].includes(wc)) wc.setBackgroundThrottling(!SMOKE);
+    },
+    cancelExport: async (exportId) => {
+      releaseExport(exportId);
+      await endExport(exportId, true);
+    },
+    abortInRenderer: (requestId) => broadcast('export:cliCancel', requestId),
+    log: (line) => process.stderr.write(`${line}\n`),
+    settled: () => quitIfOnlyForCli(),
+  });
+  const quitIfOnlyForCli = () => {
+    const quit = quitAfterCliJob({
+      launchedForExport: startupExportRequest !== null, interacted: userInteracted, jobActive: cli.busy,
+      pendingRequests: exportRequests.length + exportAcceptsInFlight, capturePhase: capture.state.phase,
+      exportsRunning: exportsWriter.pending + mfExports.pending,
+    });
+    if (quit && !SMOKE) app.quit();
+  };
+  failCliJobNow = (error) => cli.failNow(error);
+  drainExportRequests = () => {
+    for (const path of exportRequests.splice(0)) {
+      exportAcceptsInFlight++;
+      void cli.accept(path)
+        .catch((e: unknown) => process.stderr.write(`Export request failed: ${String(e)}\n`))
+        .finally(() => {
+          exportAcceptsInFlight--;
+          quitIfOnlyForCli();
+        });
+    }
+  };
+  handleNoArgs('export:takeCliJob', (e): CliExportJob | null => cli.take(isMainWindow(e)));
+  handle('export:cliReport', (report, e) => cli.report(report, isMainWindow(e)));
+  watchCliWindow = (wc) => {
+    const lost = () => void cli.windowLost();
+    wc.once('destroyed', lost);
+    wc.on('render-process-gone', lost);
+  };
   handle('shell:showItem', ({ path }) => shell.showItemInFolder(path));
   handleNoArgs('settings:get', () => settingsInfo());
 
@@ -669,7 +744,8 @@ async function boot(): Promise<void> {
   // Cancelled or failed sessions bring the window back too.
   capture.on('state', (s) => { if ((s.phase === 'error' || s.phase === 'idle') && minimizedForCapture) restoreMain(); });
   registerIpc();
-  openMainWindow();
+  openMainWindow(startupExportRequest !== null);
+  drainExportRequests?.();
   // Recordings left behind by a recorder or app that stopped mid-recording.
   if (!SMOKE) void capture.recoverAbandoned().catch((e) => process.stderr.write(`Recovery scan failed: ${String(e)}\n`));
   if (SMOKE) {
@@ -684,6 +760,13 @@ async function boot(): Promise<void> {
 }
 
 app.on('second-instance', (_event, argv) => {
+  const exportRequest = exportRequestPathFromArgv(argv);
+  if (exportRequest) {
+    exportRequests.push(exportRequest);
+    drainExportRequests?.();
+    return;
+  }
+  markInteracted();
   const id = projectIdFromArgv(argv);
   if (id) requestOpenProject(id);
   restoreMain();
@@ -706,6 +789,7 @@ app.on('window-all-closed', () => {
 // Dock click (macOS): bring back a minimized or hidden window, or open a new one.
 app.on('activate', () => {
   if (!app.isReady()) return;
+  markInteracted();
   restoreMain();
 });
 
@@ -713,6 +797,7 @@ app.on('activate', () => {
 let exportsCancelled = false;
 app.on('will-quit', (e) => {
   globalShortcut.unregisterAll();
+  failCliJobNow?.('Momotombo quit during the export.');
   if (exportsCancelled || exportsWriter.pending + mfExports.pending === 0) return;
   e.preventDefault();
   exportsCancelled = true;

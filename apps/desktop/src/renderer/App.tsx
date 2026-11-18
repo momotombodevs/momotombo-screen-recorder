@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { CaptureState, OpenedProject, RecoveryNotice } from '@momotombo/protocol';
 import { api } from './api';
+import { CliExportStatus } from './export/CliExportStatus';
 import { t, useLang } from './i18n';
 import { Editor } from './screens/editor/Editor';
 import { Home } from './screens/Home';
@@ -74,12 +75,16 @@ export function App() {
   if (route.name === 'editor') {
     // A recording just rebuilt after a crash: say so once in the editor.
     const recovered = recoveries.find((r) => r.projectId === route.opened.id);
-    return <Editor key={route.opened.id} opened={route.opened} notice={recovered?.message}
-      onNoticeShown={() => { if (recovered) void api.dismissRecovery(recovered.recordingId); }}
-      onBack={() => { void api.closeProject(); setRoute({ name: 'home' }); setRefreshKey((k) => k + 1); }} />;
+    return <>
+      <CliExportStatus editingProjectId={openProjectId} />
+      <Editor key={route.opened.id} opened={route.opened} notice={recovered?.message}
+        onNoticeShown={() => { if (recovered) void api.dismissRecovery(recovered.recordingId); }}
+        onBack={() => { void api.closeProject(); setRoute({ name: 'home' }); setRefreshKey((k) => k + 1); }} />
+    </>;
   }
 
-  return (
+  return (<>
+    <CliExportStatus editingProjectId={openProjectId} />
     <div className="shell">
       <header className="topbar drag">
         <div className="brand no-drag"><BrandMark /><span>{t("Momotombo")}</span></div>
@@ -124,5 +129,5 @@ export function App() {
         )}
       </main>
     </div>
-  );
+  </>);
 }

@@ -564,6 +564,7 @@ export const EN: Record<string, string> = {
   "Grabar el micrófono": "Record microphone",
   "Grabar el audio del sistema": "Record system audio",
   "Formato": "Format",
+  "Exportación pedida por momotombo-edit": "Export requested by momotombo-edit",
   "Texto": "Text",
   "Pulsa en la vista previa donde quieres el texto, o un momento en la línea de tiempo: se añade un texto de 3 s. Arrastra el texto en la vista previa para moverlo.": "Press the preview where you want the text, or a moment on the timeline: a 3 s text is added. Drag the text on the preview to move it.",
   "Añadir texto aquí": "Add text here",

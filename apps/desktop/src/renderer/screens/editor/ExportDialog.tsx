@@ -4,8 +4,9 @@ import { formatTimecode, frameDuration } from '@momotombo/timing';
 import { api } from '../../api';
 import type { ExportTarget } from '@momotombo/protocol';
 import {
-  checkExportSupport, exportBaseName, ExportMedia, outputSize, renderStill, runExport, type ExportFormat, type ExportOptions, type ExportProgress, type ExportSupport,
+  checkExportSupport, exportBaseName, ExportMedia, outputSize, renderStill, runExport, type ExportFormat, type ExportProgress, type ExportSupport,
 } from '../../export/exporter';
+import { defaultExportChoices, exportOptions, writtenFormat } from '../../export/options';
 import type { Player } from '../../playback/player';
 import { useEditor, type EditorStore } from '../../state/editor-store';
 import { Button, IconButton, Segmented, Toggle } from '../../ui/controls';
@@ -20,12 +21,13 @@ export function ExportDialog({ store, onClose }: { store: EditorStore; player: P
   const project = useEditor(store, (s) => s.project);
   const cursors = useEditor(store, (s) => s.cursors);
   const mediaBase = useEditor(store, (s) => s.mediaBase);
-  const [variantId, setVariantId] = useState(project.activeVariantId);
-  const [format, setFormat] = useState<ExportFormat>(PROFILE.defaultExport);
-  const [resolution, setResolution] = useState<'1080' | '2160'>('1080');
-  const [fps, setFps] = useState<30 | 60>(project.sequence.fps.num >= 50 ? 60 : 30);
-  const [quality, setQuality] = useState<'standard' | 'high'>('high');
-  const [audio, setAudio] = useState(true);
+  const [defaults] = useState(() => defaultExportChoices(project));
+  const [variantId, setVariantId] = useState(defaults.variantId);
+  const [format, setFormat] = useState<ExportFormat>(defaults.format);
+  const [resolution, setResolution] = useState(defaults.resolution);
+  const [fps, setFps] = useState(defaults.fps);
+  const [quality, setQuality] = useState(defaults.quality);
+  const [audio, setAudio] = useState(defaults.includeAudio);
   const [progress, setProgress] = useState<ExportProgress | null>(null);
   const [checks, setChecks] = useState<Check[]>([]);
   const [confirmedFor, setConfirmedFor] = useState<string | null>(null);
@@ -43,7 +45,7 @@ export function ExportDialog({ store, onClose }: { store: EditorStore; player: P
   const baseName = customName ?? exportBaseName(project, variantId);
   // WebM stands in for MP4 when this computer has no H.264 encoder at all (route.ts); the target
   // then carries .webm, so the name shown is the file written.
-  const written: ExportFormat = support?.ok ? support.written : format;
+  const written = writtenFormat({ format }, support);
 
   useEffect(() => {
     if (busy) return;
@@ -110,7 +112,7 @@ export function ExportDialog({ store, onClose }: { store: EditorStore; player: P
   const start = async () => {
     if (!target) return;
     abort.current = new AbortController();
-    const opts: ExportOptions = { variantId, format, resolution, fps, quality, includeAudio: audio, target, ...(support?.ok ? { route: support.route } : {}) };
+    const opts = exportOptions({ variantId, format, resolution, fps, quality, includeAudio: audio }, target, support);
     setProgress({ phase: 'preparing', frame: 0, total: 0, rate: 0, etaSeconds: 0 });
     try {
       await runExport(project, cursors, mediaBase, opts, setProgress, abort.current.signal);

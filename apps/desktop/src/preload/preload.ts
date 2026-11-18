@@ -10,13 +10,13 @@ const INVOKE = new Set([
   'capture:mark', 'capture:stop', 'capture:cancel', 'capture:dismissError', 'capture:recoveries', 'capture:dismissRecovery',
   'capture:diskEstimate', 'recorder:prefs', 'recorder:setPrefs',
   'cw:open', 'cw:chunk', 'cw:close', 'cw:started', 'cw:level', 'cw:failed', 'cw:ready', 'cw:busy',
-  'export:defaultTarget', 'export:chooseTarget', 'export:encoderInfo', 'export:mfBegin', 'export:mfWrite', 'export:begin', 'export:write', 'export:end', 'shell:showItem', 'settings:get', 'settings:set',
+  'export:defaultTarget', 'export:chooseTarget', 'export:encoderInfo', 'export:mfBegin', 'export:mfWrite', 'export:begin', 'export:write', 'export:end', 'export:takeCliJob', 'export:cliReport', 'shell:showItem', 'settings:get', 'settings:set',
   'licenses:get', 'licenses:openChromium', 'licenses:openNotices',
   'smoke:report', 'smoke:writeFile', 'smoke:appendRecording', 'smoke:realRecording', 'smoke:shot', 'smoke:pickFile', 'smoke:aacFixture', 'smoke:cpu', 'smoke:avCheck', 'smoke:listDir', 'smoke:saveShot', 'smoke:docsExportFolder',
   'media:pickVideo', 'media:importVideo', 'media:discardImport',
 ]);
 
-const EVENTS = new Set(['settings:changed', 'projects:changed', 'projects:openRequest', 'capture:state', 'capture:finished', 'capture:releaseDevices', 'capture:recovered', 'cw:prepare', 'cw:go', 'cw:pause', 'cw:resume', 'cw:stop']);
+const EVENTS = new Set(['settings:changed', 'projects:changed', 'projects:openRequest', 'export:cliRequest', 'export:cliCancel', 'capture:state', 'capture:finished', 'capture:releaseDevices', 'capture:recovered', 'cw:prepare', 'cw:go', 'cw:pause', 'cw:resume', 'cw:stop']);
 
 contextBridge.exposeInMainWorld('momotombo', {
   invoke(channel: string, payload?: unknown): Promise<unknown> {

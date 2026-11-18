@@ -1,5 +1,5 @@
 import type {
-  AppInfo, BackendInfo, CaptureConfig, CaptureResult, CaptureState, OpenedProject, PermissionInfo, ProjectSummary, RecoveryNotice, SourceInfo, ImportedVideo, PickedFile, ThirdPartyInfo, ExportTarget, EncoderInfo, RecorderPrefs,
+  AppInfo, BackendInfo, CaptureConfig, CaptureResult, CaptureState, OpenedProject, PermissionInfo, ProjectSummary, RecoveryNotice, SourceInfo, ImportedVideo, PickedFile, ThirdPartyInfo, ExportTarget, EncoderInfo, RecorderPrefs, CliExportJob, CliExportReport,
 } from '@momotombo/protocol';
 import type { LangSetting, SettingsInfo } from '../shared/i18n';
 import type { DiskEstimate } from '../shared/recording-budget';
@@ -82,6 +82,10 @@ export const api = {
     call<void>('export:mfWrite', { exportId, kind, time, duration, data }),
   exportBegin: (token: string) => call<{ exportId: string; path: string }>('export:begin', { token }),
   exportWrite: (exportId: string, position: number | null, data: Uint8Array) => call<void>('export:write', { exportId, position, data }),
+  takeCliExportJob: () => call<CliExportJob | null>('export:takeCliJob'),
+  reportCliExport: (report: CliExportReport) => call<void>('export:cliReport', report),
+  onCliExportRequest: (fn: () => void) => bridge().on('export:cliRequest', () => fn()),
+  onCliExportCancel: (fn: (requestId: string) => void) => bridge().on('export:cliCancel', (id) => fn(String(id))),
   exportEnd: (exportId: string, cancel = false) => call<{ path: string; bytes: number } | null>('export:end', { exportId, cancel }),
   showItem: (path: string) => call<void>('shell:showItem', { path }),
 

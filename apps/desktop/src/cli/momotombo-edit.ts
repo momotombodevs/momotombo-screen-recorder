@@ -1,8 +1,9 @@
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
-import { readFile, readdir, stat } from "node:fs/promises";
+import { lstat, mkdir, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, dirname, extname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import {
   ProjectFormatError,
@@ -15,6 +16,17 @@ import {
 import { ticksToSeconds } from "@momotombo/timing";
 import { PROJECT_FILE, PROJECTS_FOLDER } from "../shared/brand";
 import { OPEN_PROJECT_FLAG } from "../shared/open-project";
+import {
+  EXPORT_REQUEST_FLAG,
+  ExportRequest,
+  TERMINAL_STATES,
+  outPathProblem,
+  projectExportCancelPath,
+  projectExportStatusPath,
+  projectExportRequestPath,
+  statusForRequest,
+  type ExportStatus,
+} from "../shared/export-request";
 import { safeJoin } from "../main/fsutil";
 import {
   WriteConflictError,
@@ -22,8 +34,10 @@ import {
   validatedProjectText,
   writeProjectTextIfUnchanged,
 } from "../main/project-file";
-import { ToolsMissingError, analyzeProject, toolRunner } from "./analyze";
+import { ToolsMissingError, analyzeProject, toolRunner, type Run } from "./analyze";
 import { OpError, applyOps, describeProject, parseOps, type Op } from "./ops";
+
+const DEFAULT_EXPORT_TIMEOUT_SECONDS = 1800;
 
 const USAGE = `momotombo-edit: edit Momotombo projects from the command line.
 
@@ -32,15 +46,24 @@ const USAGE = `momotombo-edit: edit Momotombo projects from the command line.
   apply <project> <ops.json | ->    apply a JSON array of ops; all or nothing
   open <project>                    open the project in the Momotombo editor
   analyze <project>                 quality report (needs ffmpeg and ffprobe on PATH): findings, verdict, suggested ops
+  export <project>                  render the project with the Momotombo app and wait for the file
 
 <project> is "latest", a project id, or an exact project name.
 Options: --root <projects folder>   --dry-run (apply: validate and report, write nothing)
-Exit codes: 0 done, 1 usage or other error, 3 invalid ops or project, 4 the project changed while applying (nothing written),
-            5 analyze needs ffmpeg and ffprobe on PATH`;
+export:  --variant <id|name>  --format mp4|webm  --resolution 1080|2160  --fps 30|60  --quality standard|high
+         --no-audio  --out <new file, absolute or relative to here>  --timeout <seconds, default ${DEFAULT_EXPORT_TIMEOUT_SECONDS}>
+Exit codes: 0 done, 1 usage or other error (incl. the app not starting or not answering within 45 s), 3 invalid ops,
+            project or export options (also when the app rejects them), 4 the project changed while applying (nothing written),
+            5 analyze needs ffmpeg and ffprobe on PATH, 6 the app is busy (recording, exporting, another project in the editor),
+            7 the export failed, 8 no result before --timeout (the export is cancelled), 130 interrupted (the export is cancelled)`;
 
-export const EXIT = { ok: 0, usage: 1, invalid: 3, conflict: 4, toolsMissing: 5 } as const;
+export const EXIT = { ok: 0, usage: 1, invalid: 3, conflict: 4, toolsMissing: 5, refused: 6, failed: 7, timeout: 8, interrupted: 130 } as const;
 
 class UsageError extends Error {}
+class ExportRefusedError extends Error {}
+class ExportFailedError extends Error {}
+class ExportTimeoutError extends Error {}
+class ExportInterruptedError extends Error {}
 
 interface Found {
   dir: string;
@@ -60,6 +83,12 @@ export interface Io {
   err: (text: string) => void;
   stdin: () => Promise<string>;
   env: NodeJS.ProcessEnv;
+  launchApp?: (flag: string, env: NodeJS.ProcessEnv) => Promise<string>;
+  pollMs?: number;
+  takeDeadlineMs?: number;
+  cancelWaitMs?: number;
+  interrupt?: AbortSignal;
+  run?: Run;
 }
 
 function projectsRoot(flag: string | undefined, env: NodeJS.ProcessEnv): string {
@@ -180,8 +209,12 @@ export function launch(command: string, args: string[], waitForExit: boolean): P
   });
 }
 
-async function openInApp(projectId: string, env: NodeJS.ProcessEnv): Promise<string> {
-  const flag = `${OPEN_PROJECT_FLAG}${projectId}`;
+export function openArgs(app: string, flag: string, env: NodeJS.ProcessEnv, background: boolean, appDir?: string): string[] {
+  const testHome = env.MOMOTOMBO_TEST_HOME ? ["--env", `MOMOTOMBO_TEST_HOME=${env.MOMOTOMBO_TEST_HOME}`] : [];
+  return ["-n", ...(background ? ["-g"] : []), ...testHome, app, "--args", ...(appDir ? [appDir] : []), flag];
+}
+
+async function launchApp(flag: string, env: NodeJS.ProcessEnv, background: boolean): Promise<string> {
   const appDir = resolve(__dirname, "..", "..");
   const chosen = env.MOMOTOMBO_APP;
   if (process.platform !== "darwin") {
@@ -192,16 +225,200 @@ async function openInApp(projectId: string, env: NodeJS.ProcessEnv): Promise<str
   const installed = chosen ?? "/Applications/Momotombo.app";
   const development = join(appDir, ".dev-app", "Momotombo Development.app");
   if (existsSync(installed)) {
-    await launch("open", ["-n", installed, "--args", flag], true);
+    await launch("open", openArgs(installed, flag, env, background), true);
     return installed;
   }
   if (existsSync(development)) {
-    await launch("open", ["-n", development, "--args", appDir, flag], true);
+    await launch("open", openArgs(development, flag, env, background, appDir), true);
     return development;
   }
   throw new Error(
     "Momotombo is not installed and has no development app yet. Run `pnpm start` once, or set MOMOTOMBO_APP.",
   );
+}
+
+interface ExportFlags {
+  variant?: string;
+  format?: string;
+  resolution?: string;
+  fps?: string;
+  quality?: string;
+  "no-audio"?: boolean;
+  out?: string;
+}
+
+function oneOf<T extends string>(flag: string, value: string | undefined, allowed: readonly T[]): T | undefined {
+  if (value === undefined) return undefined;
+  if (!(allowed as readonly string[]).includes(value)) throw new OpError(`--${flag} must be ${allowed.join(" or ")}, got ${value}.`);
+  return value as T;
+}
+
+export function exportRequest(project: Project, flags: ExportFlags, cwd: string, requestId: string): ExportRequest {
+  const out = flags.out === undefined ? undefined : resolve(cwd, flags.out);
+  const format = oneOf("format", flags.format, ["mp4", "webm"] as const) ?? (out && extname(out).toLowerCase() === ".webm" ? "webm" : "mp4");
+  let variantId: string | undefined;
+  if (flags.variant !== undefined) {
+    const wanted = flags.variant.toLowerCase();
+    const variant = project.variants.find((v) => v.id === flags.variant || v.name.toLowerCase() === wanted);
+    if (!variant)
+      throw new OpError(`No format "${flags.variant}" in the project; it has ${project.variants.map((v) => `${v.id} (${v.name})`).join(", ")}.`);
+    variantId = variant.id;
+  }
+  const fps = oneOf("fps", flags.fps, ["30", "60"] as const);
+  const parsed = ExportRequest.safeParse({
+    requestId,
+    projectId: project.id,
+    format,
+    ...(variantId ? { variantId } : {}),
+    ...(flags.resolution !== undefined ? { resolution: oneOf("resolution", flags.resolution, ["1080", "2160"] as const) } : {}),
+    ...(fps ? { fps: Number(fps) } : {}),
+    ...(flags.quality !== undefined ? { quality: oneOf("quality", flags.quality, ["standard", "high"] as const) } : {}),
+    ...(flags["no-audio"] ? { includeAudio: false } : {}),
+    ...(out ? { out } : {}),
+  });
+  if (!parsed.success) throw new OpError(`Invalid export options: ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`);
+  return parsed.data;
+}
+
+async function checkOut(out: string, format: "mp4" | "webm", root: string): Promise<void> {
+  const realParent = await realpath(dirname(out)).then(
+    async (p) => ((await stat(p)).isDirectory() ? p : null),
+    () => null,
+  );
+  const taken = await lstat(out).then(() => true, (e: NodeJS.ErrnoException) => e.code !== "ENOENT");
+  const projectsRoot = await realpath(root).catch(() => root);
+  const problem = outPathProblem(out, format, { realParent, projectsRoot, taken });
+  if (problem) throw new OpError(problem);
+}
+
+export interface MediaSummary {
+  durationSeconds: number | null;
+  video: { codec: string; width: number; height: number; fps: number | null } | null;
+  audio: { codec: string; sampleRate: number | null; channels: number | null } | null;
+}
+
+export function mediaSummary(ffprobeJson: string): MediaSummary {
+  const data = JSON.parse(ffprobeJson) as { streams?: Record<string, unknown>[]; format?: { duration?: string } };
+  const streams = data.streams ?? [];
+  const v = streams.find((s) => s.codec_type === "video");
+  const a = streams.find((s) => s.codec_type === "audio");
+  const num = (x: unknown) => (x === undefined || x === null || Number.isNaN(Number(x)) ? null : Number(x));
+  const rate = (x: unknown) => {
+    const [n, d] = String(x ?? "").split("/").map(Number);
+    return n && d ? Math.round((n / d) * 1000) / 1000 : null;
+  };
+  const duration = num(data.format?.duration);
+  return {
+    durationSeconds: duration === null ? null : Math.round(duration * 1000) / 1000,
+    video: v ? { codec: String(v.codec_name), width: Number(v.width), height: Number(v.height), fps: rate(v.avg_frame_rate) } : null,
+    audio: a ? { codec: String(a.codec_name), sampleRate: num(a.sample_rate), channels: num(a.channels) } : null,
+  };
+}
+
+async function probeMedia(file: string, run: Run): Promise<MediaSummary | null> {
+  try {
+    return mediaSummary(await run("ffprobe", ["-v", "error", "-of", "json", "-show_streams", "-show_format", file]));
+  } catch (e) {
+    if (e instanceof ToolsMissingError) return null;
+    throw e;
+  }
+}
+
+const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+const TAKE_DEADLINE_MS = 45_000;
+const CANCEL_WAIT_MS = 15_000;
+
+async function waitForInterrupt<T>(io: Io, task: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  if (io.interrupt) return task(io.interrupt);
+  const controller = new AbortController();
+  const onSignal = () => controller.abort();
+  process.once("SIGINT", onSignal);
+  process.once("SIGTERM", onSignal);
+  try {
+    return await task(controller.signal);
+  } finally {
+    process.removeListener("SIGINT", onSignal);
+    process.removeListener("SIGTERM", onSignal);
+  }
+}
+
+async function exportInApp(chosen: Found, request: ExportRequest, root: string, timeoutSeconds: number, io: Io): Promise<unknown> {
+  if (request.out) await checkOut(request.out, request.format, root);
+  const { requestId } = request;
+  const requestFile = join(chosen.dir, projectExportRequestPath(requestId));
+  const statusFile = join(chosen.dir, projectExportStatusPath(requestId));
+  const cancelFile = join(chosen.dir, projectExportCancelPath(requestId));
+  const readStatus = async () => statusForRequest(await readFile(statusFile, "utf8").catch(() => null), requestId);
+  const finished = (s: ExportStatus | null): s is ExportStatus => !!s && TERMINAL_STATES.includes(s.state);
+  const pollMs = io.pollMs ?? 500;
+  const started = Date.now();
+  await mkdir(dirname(requestFile), { recursive: true });
+  await writeFile(requestFile, JSON.stringify(request));
+  let status: ExportStatus | null = null;
+  let stopped: "timeout" | "interrupt" | null = null;
+  let progressAtStop: ExportStatus | null = null;
+  try {
+    const app = await (io.launchApp ?? ((flag, env) => launchApp(flag, env, true)))(`${EXPORT_REQUEST_FLAG}${requestFile}`, io.env);
+    await waitForInterrupt(io, async (interrupt) => {
+      const takeBy = started + Math.min(io.takeDeadlineMs ?? TAKE_DEADLINE_MS, timeoutSeconds * 1000);
+      const deadline = started + timeoutSeconds * 1000;
+      while (!finished(status)) {
+        if (interrupt.aborted) { stopped = "interrupt"; break; }
+        if (!status && Date.now() > takeBy)
+          throw new Error(`${app} did not acknowledge the export request within ${Math.round((takeBy - started) / 1000)} s; check that Momotombo starts (MOMOTOMBO_APP, pnpm start).`);
+        if (Date.now() > deadline) { stopped = "timeout"; break; }
+        await pause(pollMs);
+        status = (await readStatus()) ?? status;
+      }
+    });
+    if (stopped) {
+      progressAtStop = status;
+      await writeFile(cancelFile, "");
+      const cancelBy = Date.now() + (io.cancelWaitMs ?? CANCEL_WAIT_MS);
+      while (!finished(status) && Date.now() < cancelBy) {
+        await pause(pollMs);
+        status = (await readStatus()) ?? status;
+      }
+    }
+  } finally {
+    await rm(requestFile, { force: true });
+  }
+  if (stopped && status?.state !== "done") {
+    const at = progressAtStop as ExportStatus | null;
+    const where = at ? `it was ${at.state} at ${Math.round(at.progress * 100)}%` : "it had not started";
+    if (finished(status)) await rm(statusFile, { force: true });
+    const outcome = finished(status) ? "the app cancelled it and removed the partial file" : `the app did not confirm the cancellation (${statusFile})`;
+    const message = stopped === "timeout" ? `No result after ${timeoutSeconds} s (${where}); ${outcome}.` : `Interrupted (${where}); ${outcome}.`;
+    throw stopped === "timeout" ? new ExportTimeoutError(message) : new ExportInterruptedError(message);
+  }
+  if (!finished(status)) throw new ExportFailedError(`The export ended without a result (${statusFile}).`);
+  await rm(statusFile, { force: true });
+  if (status.state === "refused") {
+    const message = `The app refused the export (${status.reason}): ${status.error}`;
+    throw status.reason === "invalid-request" ? new OpError(message) : new ExportRefusedError(message);
+  }
+  if (status.state === "failed") throw new ExportFailedError(`The export failed: ${status.error}`);
+  const outFile = status.outFile!;
+  const info = await stat(outFile).catch(() => null);
+  if (!info?.isFile() || info.size !== status.bytes)
+    throw new ExportFailedError(`The app reported ${outFile} done, but it is missing or incomplete.`);
+  if (request.out) {
+    const wanted = join(await realpath(dirname(request.out)), basename(request.out));
+    if ((await realpath(outFile)) !== wanted) throw new ExportFailedError(`The app wrote ${outFile} instead of ${request.out}.`);
+  }
+  return {
+    id: chosen.project.id,
+    requestId,
+    state: status.state,
+    outFile,
+    bytes: info.size,
+    format: request.format,
+    timelineSeconds: durationSeconds(chosen.project),
+    elapsedSeconds: Math.round((Date.now() - started) / 100) / 10,
+    privacyAreas: chosen.project.privacy.length,
+    media: await probeMedia(outFile, io.run ?? toolRunner(io.env)),
+  };
 }
 
 async function main(argv: string[], io: Io): Promise<unknown> {
@@ -213,6 +430,14 @@ async function main(argv: string[], io: Io): Promise<unknown> {
       options: {
         root: { type: "string" },
         "dry-run": { type: "boolean", default: false },
+        variant: { type: "string" },
+        format: { type: "string" },
+        resolution: { type: "string" },
+        fps: { type: "string" },
+        quality: { type: "string" },
+        "no-audio": { type: "boolean", default: false },
+        out: { type: "string" },
+        timeout: { type: "string" },
         help: { type: "boolean", short: "h", default: false },
       },
     });
@@ -222,7 +447,7 @@ async function main(argv: string[], io: Io): Promise<unknown> {
   const { values, positionals } = parsed;
   const [command, ref, opsFile] = positionals;
   if (values.help || !command) return USAGE;
-  if (!["list", "describe", "apply", "open", "analyze"].includes(command))
+  if (!["list", "describe", "apply", "open", "analyze", "export"].includes(command))
     throw new UsageError(`Unknown command "${command}".\n\n${USAGE}`);
   const root = projectsRoot(values.root, io.env);
   const found = await findProjects(root);
@@ -277,8 +502,19 @@ async function main(argv: string[], io: Io): Promise<unknown> {
           "open shows the project in the app, which only reads its own projects folder; drop --root.",
         );
       const { project } = pick(found, ref, root);
-      const app = await openInApp(project.id, io.env);
+      const app = await launchApp(`${OPEN_PROJECT_FLAG}${project.id}`, io.env, false);
       return { id: project.id, opened: true, app };
+    }
+    case "export": {
+      if (values.root)
+        throw new UsageError(
+          "export runs in the app, which only reads its own projects folder; drop --root.",
+        );
+      const chosen = pick(found, ref, root);
+      const request = exportRequest(chosen.project, values, process.cwd(), `xr_${randomBytes(8).toString("hex")}`);
+      const timeout = values.timeout === undefined ? DEFAULT_EXPORT_TIMEOUT_SECONDS : Number(values.timeout);
+      if (!Number.isFinite(timeout) || timeout <= 0) throw new UsageError(`--timeout must be a number of seconds above 0, got ${values.timeout}.`);
+      return exportInApp(chosen, request, root, timeout, io);
     }
     default:
       throw new UsageError(`Unknown command "${command}".\n\n${USAGE}`);
@@ -286,6 +522,10 @@ async function main(argv: string[], io: Io): Promise<unknown> {
 }
 
 function exitCode(e: unknown): number {
+  if (e instanceof ExportRefusedError) return EXIT.refused;
+  if (e instanceof ExportFailedError) return EXIT.failed;
+  if (e instanceof ExportTimeoutError) return EXIT.timeout;
+  if (e instanceof ExportInterruptedError) return EXIT.interrupted;
   if (e instanceof WriteConflictError) return EXIT.conflict;
   if (e instanceof ToolsMissingError) return EXIT.toolsMissing;
   if (e instanceof OpError || e instanceof ProjectFormatError) return EXIT.invalid;
