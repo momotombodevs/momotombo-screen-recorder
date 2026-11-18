@@ -122,7 +122,7 @@ export function Editor({ opened, onBack, notice: initialNotice, onNoticeShown }:
       const markerStep = markerShortcut(e, null);
       if (markerStep) {
         e.preventDefault();
-        const to = adjacentMarker(markerTimes(s.project, layoutSegments(s.project)), s.playhead, markerStep, fd / 2);
+        const to = adjacentMarker(markerTimes(s.project.recordings, layoutSegments(s.project)), s.playhead, markerStep, fd / 2);
         if (to === null) store.notify(t("No hay más marcas en esa dirección."));
         else seekRef.current(to);
         return;

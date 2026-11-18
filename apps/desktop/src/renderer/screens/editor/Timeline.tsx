@@ -470,8 +470,7 @@ export function Timeline({ store, player }: { store: EditorStore; player: Player
     <span key={i} style={{ left: (b.t / TICKS_PER_SECOND) * pps, width: Math.max(1, pps * 0.5 - 1), height: 2 + b.v * 9, opacity: 0.25 + b.v * 0.75 }} />
   )), [placements, cursors, pps]);
 
-  // markerTimes reads only the recordings and the placements it is given.
-  const markers = useMemo(() => markerTimes(project, placements), [recordings, placements]); // eslint-disable-line react-hooks/exhaustive-deps
+  const markers = useMemo(() => markerTimes(recordings, placements), [recordings, placements]);
 
   const step = niceStep(pps);
   const ticks: ReactNode[] = [];

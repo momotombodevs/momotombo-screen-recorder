@@ -12,7 +12,7 @@ function recording(id: string, seconds: number, markers: number[]): Recording {
   };
 }
 
-const seconds = (p: Project) => markerTimes(p, layoutSegments(p)).map((t) => t / sec(1));
+const seconds = (p: Project) => markerTimes(p.recordings, layoutSegments(p)).map((t) => t / sec(1));
 
 describe('markerTimes', () => {
   it('lists every recording marker in timeline order', () => {

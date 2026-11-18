@@ -1,10 +1,15 @@
-import { sourceToTimeline, type Project, type SegmentPlacement } from '@momotombo/project-model';
+import type { Project, SegmentPlacement } from '@momotombo/project-model';
 import type { Ticks } from '@momotombo/timing';
 
-export function markerTimes(project: Project, placements: SegmentPlacement[]): Ticks[] {
-  const times = Object.values(project.recordings).flatMap((r) =>
-    r.markers.map((m) => sourceToTimeline(project, r.id, m, placements)).filter((t): t is Ticks => t !== null));
-  return [...new Set(times)].sort((a, b) => a - b);
+export function markerTimes(recordings: Project['recordings'], placements: readonly SegmentPlacement[]): Ticks[] {
+  const times = new Set<Ticks>();
+  for (const r of Object.values(recordings)) {
+    for (const m of r.markers) {
+      const pl = placements.find((p) => p.segment.recordingId === r.id && m >= p.segment.sourceStart && m < p.segment.sourceEnd);
+      if (pl) times.add(pl.timelineStart + (m - pl.segment.sourceStart));
+    }
+  }
+  return [...times].sort((a, b) => a - b);
 }
 
 export function adjacentMarker(times: readonly Ticks[], playhead: Ticks, direction: 1 | -1, tolerance: Ticks): Ticks | null {
