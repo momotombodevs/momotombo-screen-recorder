@@ -256,6 +256,42 @@ describe('updating items', () => {
   });
 });
 
+describe('out-of-range values in an op', () => {
+  const failure = (ops: unknown, project = sixtySeconds()) => {
+    try {
+      run(ops, project);
+    } catch (e) {
+      return (e as Error).message;
+    }
+    return 'no error';
+  };
+
+  it('refuses a gain above the limit instead of clamping it', () => {
+    expect(failure([{ op: 'setAudio', patch: { mic: { gain: 4 } } }])).toBe('op 0 (setAudio): audio.mic.gain must be ≤ 3');
+  });
+
+  it('names the op and the field in English', () => {
+    expect(failure([{ op: 'rename', name: 'x' }, { op: 'setAudio', patch: { mic: { compressor: { ratio: 50 } } } }]))
+      .toBe('op 1 (setAudio): audio.mic.compressor.ratio must be ≤ 20');
+  });
+
+  it.each([
+    ['setStyle', [{ op: 'setStyle', patch: { frame: { padding: 0.9 } } }], 'op 0 (setStyle): style.frame.padding must be ≤ 0.5'],
+    ['setStyle type', [{ op: 'setStyle', patch: { frame: { padding: 'wide' } } }], 'op 0 (setStyle): style.frame.padding must be a finite number'],
+    ['updateVariant', [{ op: 'updateVariant', id: 'v_1x1', patch: { width: 0 } }], 'op 0 (updateVariant): variants[2].width must be ≥ 1'],
+    ['addCameraLayout', [{ op: 'addCameraLayout', start: 1, end: 3, layout: { shape: 'blob' } }], /^op 0 \(addCameraLayout\): cameraLayouts\[0\]\.layout\.shape must be one of circle \| /],
+  ])('names the op for an out-of-range %s', (_name, ops, message) => {
+    const got = failure(ops);
+    if (typeof message === 'string') expect(got).toBe(message);
+    else expect(got).toMatch(message);
+  });
+
+  it('names the op for an out-of-range updateItem patch', () => {
+    const p = apply([{ op: 'addZoom', start: 2, end: 4 }]);
+    expect(failure([{ op: 'updateItem', track: 'zooms', id: p.zooms[0]!.id, patch: { scale: 0 } }], p)).toBe('op 0 (updateItem): zooms[0].scale must be > 0');
+  });
+});
+
 describe('style and audio patches', () => {
   it('changes the style', () => {
     const after = apply([{ op: 'setStyle', patch: { frame: { padding: 0.1 }, cursor: { scale: 1.5 } } }]);
@@ -286,10 +322,6 @@ describe('style and audio patches', () => {
     expect(() => run([{ op: 'setStyle', patch }])).toThrow(message);
   });
 
-  it('leaves a style the editor could not draw to the project validation', () => {
-    const edited = apply([{ op: 'setStyle', patch: { frame: { padding: 'wide' } } }]);
-    expect(() => validatedProjectText(edited)).toThrow(/style\.frame\.padding/);
-  });
 
   it('changes the audio mix', () => {
     const { audio } = apply([{ op: 'setAudio', patch: { mic: { gain: 0.5 }, system: { muted: true } } }]);

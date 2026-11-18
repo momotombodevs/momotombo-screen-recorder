@@ -149,6 +149,13 @@ describe('apply', () => {
     ]);
   });
 
+  it('refuses an out-of-range audio value in English, naming the op', async () => {
+    await saveProject('a', 'Demo', '2026-11-01T00:00:00.000Z');
+    const { code, err } = await cli(['apply', 'latest', '-'], ops([{ op: 'setAudio', patch: { mic: { compressor: { ratio: 50 } } } }]));
+    expect(code).toBe(EXIT.invalid);
+    expect(err).toBe('momotombo-edit: op 0 (setAudio): audio.mic.compressor.ratio must be ≤ 20\n');
+  });
+
   it('refuses a misspelled style field', async () => {
     await saveProject('a', 'Demo', '2026-11-01T00:00:00.000Z');
     const { code, err } = await cli(['apply', 'latest', '-'], ops([{ op: 'setStyle', patch: { camera: { positon: { x: 0.1, y: 0.1 } } } }]));

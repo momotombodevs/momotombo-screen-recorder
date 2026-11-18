@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ProjectFormatError, createProject, defaultAudio, parseProject, serializeProject, setAudio } from './index';
+import { AUDIO_LIMITS, MAX_AUDIO_GAIN, ProjectFormatError, createProject, defaultAudio, parseProject, serializeProject, setAudio } from './index';
 import { validateAudio } from './validate';
 
 const saved = () => JSON.parse(serializeProject(createProject('a'))) as Record<string, any>;
@@ -32,6 +32,23 @@ describe('audio mix', () => {
     expect(parseProject(j).audio.mic.gain).toBe(3);
     j.audio.mic.gain = -0.1;
     expect(() => parseProject(j)).toThrow(ProjectFormatError);
+  });
+
+  it('names the field, the rule and the limit of an out-of-range value', () => {
+    let error: unknown;
+    try {
+      validateAudio(setAudio(createProject('a'), { mic: { compressor: { ratio: 50 } } }).audio);
+    } catch (e) {
+      error = e;
+    }
+    expect(error).toBeInstanceOf(ProjectFormatError);
+    expect(error).toMatchObject({ field: 'audio.mic.compressor.ratio', rule: { kind: 'max', limit: 20 }, message: 'Campo no válido: audio.mic.compressor.ratio (mayor que 20)' });
+  });
+
+  it('validates audio against the shared limits', () => {
+    const tooLoud = AUDIO_LIMITS.normalize.targetLufs.max + 1;
+    expect(() => validateAudio(setAudio(createProject('a'), { mic: { normalize: { targetLufs: tooLoud } } }).audio)).toThrow('audio.mic.normalize.targetLufs');
+    expect(AUDIO_LIMITS.gain.max).toBe(MAX_AUDIO_GAIN);
   });
 
   it('reports a broken channel as a format error', () => {

@@ -35,7 +35,7 @@ import {
   writeProjectTextIfUnchanged,
 } from "../main/project-file";
 import { ToolsMissingError, analyzeProject, toolRunner, type Run } from "./analyze";
-import { OpError, applyOps, describeProject, parseOps, type Op } from "./ops";
+import { OpError, applyOps, describeProject, formatProblem, parseOps, type Op } from "./ops";
 
 const DEFAULT_EXPORT_TIMEOUT_SECONDS = 1800;
 
@@ -538,7 +538,7 @@ export async function run(argv: string[], io: Io): Promise<number> {
     io.out(`${typeof out === "string" ? out : JSON.stringify(out, null, 2)}\n`);
     return EXIT.ok;
   } catch (e) {
-    const lines = (e as Error).message.split("\n");
+    const lines = (e instanceof ProjectFormatError ? formatProblem(e) : (e as Error).message).split("\n");
     io.err(lines.map((l) => `momotombo-edit: ${l}\n`).join(""));
     return exitCode(e);
   }

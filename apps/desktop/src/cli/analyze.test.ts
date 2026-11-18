@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { mkdtemp, mkdir, readdir, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
-import { MAX_AUDIO_GAIN, addRecording, createProject, removeTimelineRange, serializeProject, type AudioChannel, type Project, type Recording } from '@momotombo/project-model';
+import { AUDIO_LIMITS, MAX_AUDIO_GAIN, addRecording, createProject, removeTimelineRange, serializeProject, type AudioChannel, type Project, type Recording } from '@momotombo/project-model';
 import { secondsToTicks } from '@momotombo/timing';
 import { describe, expect, it } from 'vitest';
 import {
@@ -166,7 +166,7 @@ describe('findingsFor', () => {
   });
 
   it('lets normalization rescue a quiet but clean mic', () => {
-    const found = findingsFor(withMic({ integratedLufs: -38, noiseFloorDb: -75, silenceShare: 0.4 }));
+    const found = findingsFor(withMic({ integratedLufs: -34, noiseFloorDb: -75, silenceShare: 0.4 }));
     expect(codes(found)).toEqual(['warning:MIC_TOO_QUIET']);
     expect(verdictFor(found).verdict).toBe('edit-with-fixes');
   });
@@ -189,6 +189,11 @@ describe('findingsFor', () => {
     const [finding] = findingsFor(withMic({ integratedLufs: -40, noiseFloorDb: -52, silenceShare: 0.5 }));
     expect(finding).toMatchObject({ severity: 'blocker', code: 'MIC_TOO_QUIET', evidence: { marginDb: 12 } });
     expect(finding!.message).toBe('The voice is only 12 dB above the room noise (loudness -40 LUFS); bringing it to -16 LUFS would raise the noise floor to about -28 dBFS.');
+  });
+
+  it('blocks a clean mic that needs more boost than the editor gives (the app caps normalization)', () => {
+    expect(AUDIO_LIMITS.normalize.maxBoostDb).toBe(20);
+    expect(codes(findingsFor(withMic({ integratedLufs: -38, noiseFloorDb: -75, silenceShare: 0.4 })))).toEqual(['blocker:MIC_TOO_QUIET']);
   });
 
   it('blocks a quiet mic that needs more boost than normalization gives', () => {
@@ -339,11 +344,12 @@ describe('micLevelSuggestion', () => {
   });
 
   it('turns on voice normalization when the project supports it', () => {
-    expect(micLevelSuggestion(voiceProject(), [mic(-38, -20)], [])).toEqual({
-      method: 'normalize', currentGain: 1, measuredLufs: -38, targetLufs: -16, neededGain: 12.59, suggestedGain: null, expectedLufs: -16, limitedBy: null, withheldBy: [],
+    expect(micLevelSuggestion(voiceProject(), [mic(-34, -20)], [])).toEqual({
+      method: 'normalize', currentGain: 1, measuredLufs: -34, targetLufs: -16, neededGain: 7.94, suggestedGain: null, expectedLufs: -16, limitedBy: null, withheldBy: [],
       op: { op: 'setAudio', patch: { mic: { highpassHz: 80, normalize: { enabled: true } } } },
     });
-    expect(micLevelSuggestion(voiceProject(), [mic(-50, -30)], [])).toMatchObject({ limitedBy: 'max-normalize', expectedLufs: -20 });
+    expect(micLevelSuggestion(voiceProject(), [mic(-50, -30)], [])).toMatchObject({ limitedBy: 'max-normalize', expectedLufs: -30 });
+    expect(micLevelSuggestion(voiceProject(), [mic(-48.9, -30)], [])).toMatchObject({ limitedBy: 'max-normalize', expectedLufs: -28.9 });
     expect(micLevelSuggestion(voiceProject({ highpassHz: 80, normalize: { enabled: true, targetLufs: -16 } }), [mic(-38, -20)], [])!.op).toBeNull();
   });
 
@@ -495,13 +501,14 @@ describe.skipIf(!hasFfmpeg)('analyzeProject with the real ffmpeg', () => {
     const media = (name: string) => join(dir, 'media', 'r1', name);
     execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'testsrc=s=1920x1080:r=30:d=12', '-c:v', 'mpeg4', '-q:v', '10', media('screen.mp4')]);
     execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'sine=f=180:r=48000:d=12', '-f', 'lavfi', '-i', 'anoisesrc=r=48000:a=0.0001:d=12', '-filter_complex',
-      "[0]volume='0.13*gt(sin(2*PI*t*0.5),0)*(0.6+0.4*sin(2*PI*t*4))':eval=frame[v];[v][1]amix=inputs=2:normalize=0,aformat=channel_layouts=mono", '-c:a', 'aac', media('mic.m4a')]);
+      "[0]volume='0.5*gt(sin(2*PI*t*0.5),0)*(0.6+0.4*sin(2*PI*t*4))':eval=frame[v];[v][1]amix=inputs=2:normalize=0,aformat=channel_layouts=mono", '-c:a', 'aac', media('mic.m4a')]);
     const project = addRecording(createProject('Quiet'), recording(12, { screen: source('screen', 12), mic: source('mic', 12) }));
     const before = await snapshot(dir);
     const report = await analyzeProject(dir, project);
     expect(await snapshot(dir)).toEqual(before);
     const mic = report.recordings[0]!.audio.mic!;
-    expect(mic.integratedLufs).toBeLessThan(-40);
+    expect(mic.integratedLufs).toBeLessThan(-30);
+    expect(mic.integratedLufs).toBeGreaterThan(-16 - 20);
     expect(mic.silenceShare).toBeLessThan(0.7);
     expect(codes(report.findings)).toContain('warning:MIC_TOO_QUIET');
     expect(report.findings.map((f) => f.code)).not.toContain('MIC_SILENT');
