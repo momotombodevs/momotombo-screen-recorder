@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { addRecording, createProject, layoutSegments, removeSegment, splitAt, type Project, type Recording } from '@momotombo/project-model';
 import { secondsToTicks as sec } from '@momotombo/timing';
-import { adjacentMarker, markerTimes } from './markers';
+import { adjacentMarker, markerShortcut, markerTimes } from './markers';
 
 function recording(id: string, seconds: number, markers: number[]): Recording {
   return {
@@ -18,6 +18,11 @@ describe('markerTimes', () => {
   it('lists every recording marker in timeline order', () => {
     const p = addRecording(addRecording(createProject('M'), recording('r1', 10, [8, 2])), recording('r2', 5, [1]));
     expect(seconds(p)).toEqual([2, 8, 11]);
+  });
+
+  it('lists two markers on the same instant once, so each listed time is unique', () => {
+    const p = addRecording(createProject('M'), recording('r1', 10, [2, 5, 2]));
+    expect(seconds(p)).toEqual([2, 5]);
   });
 
   it('skips markers inside removed material and shifts the ones after the cut', () => {
@@ -46,5 +51,43 @@ describe('adjacentMarker', () => {
     expect(adjacentMarker(times, sec(9), 1, half)).toBeNull();
     expect(adjacentMarker(times, sec(1), -1, half)).toBeNull();
     expect(adjacentMarker([], 0, 1, half)).toBeNull();
+  });
+});
+
+describe('markerShortcut', () => {
+  const press = (key: string, mods: { meta?: boolean; ctrl?: boolean; alt?: boolean } = {}) =>
+    ({ key, metaKey: !!mods.meta, ctrlKey: !!mods.ctrl, altKey: !!mods.alt });
+  const body = { tagName: 'BODY', isContentEditable: false };
+  const textarea = { tagName: 'TEXTAREA', isContentEditable: false };
+
+  it('reads [ and ] typed on a US layout', () => {
+    expect(markerShortcut(press('['), body)).toBe(-1);
+    expect(markerShortcut(press(']'), body)).toBe(1);
+  });
+
+  it('reads [ and ] typed with Option on a Spanish Mac layout', () => {
+    expect(markerShortcut(press('[', { alt: true }), body)).toBe(-1);
+    expect(markerShortcut(press(']', { alt: true }), body)).toBe(1);
+  });
+
+  it('reads [ and ] typed with AltGr on Windows, which reports Ctrl and Alt together', () => {
+    expect(markerShortcut(press('[', { ctrl: true, alt: true }), body)).toBe(-1);
+    expect(markerShortcut(press(']', { ctrl: true, alt: true }), body)).toBe(1);
+  });
+
+  it('also answers to , and . without modifiers, which sit unshifted on Spanish and US layouts', () => {
+    expect(markerShortcut(press(','), body)).toBe(-1);
+    expect(markerShortcut(press('.'), body)).toBe(1);
+    expect(markerShortcut(press(',', { meta: true }), body)).toBeNull();
+    expect(markerShortcut(press('.', { alt: true }), body)).toBeNull();
+  });
+
+  it('ignores Cmd or Ctrl chords and keys typed into a text field', () => {
+    expect(markerShortcut(press('[', { meta: true }), body)).toBeNull();
+    expect(markerShortcut(press(']', { ctrl: true }), body)).toBeNull();
+    expect(markerShortcut(press('[', { meta: true, alt: true }), body)).toBeNull();
+    expect(markerShortcut(press('['), textarea)).toBeNull();
+    expect(markerShortcut(press(','), { tagName: 'DIV', isContentEditable: true })).toBeNull();
+    expect(markerShortcut(press('a'), body)).toBeNull();
   });
 });
