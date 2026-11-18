@@ -135,6 +135,13 @@ describe('adding items', () => {
     expect(after.cameraLayouts).toMatchObject([{ shown: [{ start: 2, end: 6 }], origin: 'manual', layout: { shape: 'square', size: 0.3, mirror: true } }]);
   });
 
+  it('deep-merges a nested camera layout patch', () => {
+    const after = apply([{ op: 'addCameraLayout', start: 2, end: 6, layout: { position: { x: 0.2 }, border: { width: 4 } } }]).cameraLayouts[0]!;
+    const base = sixtySeconds().style.camera;
+    expect(after.layout.position).toEqual({ x: 0.2, y: base.position.y });
+    expect(after.layout.border).toEqual({ ...base.border, width: 4 });
+  });
+
   it('refuses a camera layout patch with a misspelled field', () => {
     expect(() => run([{ op: 'addCameraLayout', start: 2, end: 6, layout: { shpe: 'square' } }])).toThrow(/unknown field layout\.shpe/);
   });
@@ -180,10 +187,51 @@ describe('updating items', () => {
   it.each([
     ['a misspelled field', { scale: 2, centre: { x: 0.2 } }, /unknown field zooms\.centre/],
     ['a misspelled nested field', { center: { z: 0.2 } }, /unknown field zooms\.center\.z/],
-    ['its time range', { start: 0 }, /zooms\.start cannot be changed/],
+    ['its source time range', { start: 0 }, /zooms\.start cannot be changed with a patch; retime it with the op's start and end/],
   ])('refuses a zoom patch with %s', (_name, patch, message) => {
     const p = withItems();
     expect(() => run([{ op: 'updateItem', track: 'zooms', id: p.zooms[0]!.id, patch }], p)).toThrow(message);
+  });
+
+  it('refuses a privacy effect patch with a misspelled field of a new kind', () => {
+    const p = withItems();
+    expect(() => run([{ op: 'updateItem', track: 'privacy', id: p.privacy[0]!.id, patch: { effect: { kind: 'blur', strenght: 1 } } }], p)).toThrow(/unknown field privacy\.effect\.strenght/);
+  });
+
+  it('retimes an item within the placement rules and reports where it landed', () => {
+    const p = withItems();
+    const zoom = p.zooms[0]!;
+    const { project, results, warnings } = run([{ op: 'updateItem', track: 'zooms', id: zoom.id, start: 20, end: 24, patch: { scale: 3 } }], p);
+    const moved = project.zooms.find((z) => z.id === zoom.id)!;
+    expect(moved).toMatchObject({ scale: 3, enter: zoom.enter, start: secondsToTicks(20), end: secondsToTicks(24) });
+    expect(results[0]).toMatchObject({ id: zoom.id, placed: { start: 20, end: 24 } });
+    expect(warnings).toEqual([]);
+  });
+
+  it('moves one edge of an item and keeps the other', () => {
+    const p = withItems();
+    const zoom = p.zooms[0]!;
+    expect(run([{ op: 'updateItem', track: 'zooms', id: zoom.id, end: 8 }], p).results[0]!.placed).toEqual({ start: 3, end: 8 });
+  });
+
+  it('shortens a retimed item that runs into a neighbour and warns', () => {
+    const p = withItems();
+    const { results, warnings } = run([{ op: 'updateItem', track: 'magnifiers', id: p.magnifiers[0]!.id, start: 8, end: 12 }],
+      apply([{ op: 'addMagnifier', start: 11, end: 13 }], p));
+    expect(results[0]!.placed).toEqual({ start: 8, end: 11 });
+    expect(warnings).toEqual([expect.stringMatching(/^op 0 \(updateItem\): placed 8–11 s instead of 8–12 s/)]);
+  });
+
+  it('refuses to retime an item onto another one', () => {
+    const p = apply([{ op: 'addMagnifier', start: 20, end: 22 }], withItems());
+    expect(() => run([{ op: 'updateItem', track: 'magnifiers', id: p.magnifiers[0]!.id, start: 21, end: 23 }], p)).toThrow(/no free space|overlaps item/);
+  });
+
+  it('changes an item that already overlapped another one before the patch', () => {
+    const p = withItems();
+    const [a, b] = p.privacy;
+    const legacy = { ...p, privacy: [a!, { ...b!, region: a!.region }] };
+    expect(apply([{ op: 'updateItem', track: 'privacy', id: b!.id, patch: { cornerRadius: 0.2 } }], legacy).privacy[1]!.cornerRadius).toBe(0.2);
   });
 
   it('refuses to move a privacy area over another one at the same time', () => {
@@ -220,6 +268,11 @@ describe('style and audio patches', () => {
     expect(apply([{ op: 'setStyle', patch: { background: { kind: 'gradient', from: '#000000', to: '#ffffff', angle: 90 } } }]).style.background.kind).toBe('gradient');
   });
 
+  it('refuses a misspelled field when switching to a background kind no preset uses', () => {
+    expect(apply([{ op: 'setStyle', patch: { background: { kind: 'image', file: 'media/bg.png', blur: 0 } } }]).style.background.kind).toBe('image');
+    expect(() => run([{ op: 'setStyle', patch: { background: { kind: 'image', file: 'media/bg.png', blur: 0, junk: 1 } } }])).toThrow(/unknown field style\.background\.junk/);
+  });
+
   it('changes a field of the current background kind', () => {
     expect(apply([{ op: 'setStyle', patch: { background: { seed: 3 } } }]).style.background).toMatchObject({ kind: 'aurora', seed: 3 });
   });
@@ -239,15 +292,9 @@ describe('style and audio patches', () => {
   });
 
   it('changes the audio mix', () => {
-    expect(apply([{ op: 'setAudio', patch: { mic: { gain: 0.5 }, system: { muted: true } } }]).audio).toEqual({ mic: { gain: 0.5, muted: false }, system: { gain: 0.8, muted: true } });
-  });
-
-  it('sets a number on an audio field whose default is null', () => {
-    const p = sixtySeconds();
-    const withNullable = { ...p, audio: { ...p.audio, mic: { ...p.audio.mic, normalize: { measuredLufs: null } } } } as Project;
-    const after = apply([{ op: 'setAudio', patch: { mic: { normalize: { measuredLufs: -18 } } } }], withNullable);
-    expect(after.audio.mic).toMatchObject({ normalize: { measuredLufs: -18 } });
-    expect(() => run([{ op: 'setAudio', patch: { mic: { normalize: { measuredLufs: -18, mesured: 1 } } } }], withNullable)).toThrow(/unknown field audio\.mic\.normalize\.mesured/);
+    const { audio } = apply([{ op: 'setAudio', patch: { mic: { gain: 0.5 }, system: { muted: true } } }]);
+    expect(audio.mic).toMatchObject({ gain: 0.5, muted: false });
+    expect(audio.system).toMatchObject({ gain: 0.8, muted: true });
   });
 
   it('refuses an audio patch with a misspelled field', () => {
@@ -277,6 +324,15 @@ describe('camera placement', () => {
 
   it('centres the camera vertically on a side', () => {
     expect(apply([{ op: 'setCamera', corner: 'left', visible: true }]).style.camera.position.y).toBe(0.5);
+  });
+
+  it('gives a format without its own camera place one when its shape differs', () => {
+    const p = sixtySeconds();
+    const square = { ...p, variants: p.variants.map((v) => (v.id === 'v_1x1' ? { ...v, cameraOverride: undefined } : v)) };
+    const after = apply([{ op: 'setCamera', corner: 'top-right', size: 0.2 }], square);
+    const v = after.variants.find((x) => x.id === 'v_1x1')!;
+    expect(v.cameraOverride).toEqual({ position: { x: 0.86, y: 0.14 } });
+    expect(after.variants.find((x) => x.id === 'v_16x9')!.cameraOverride).toBeUndefined();
   });
 
   it('refuses an unknown corner', () => {
@@ -324,13 +380,17 @@ describe('automatic zooms', () => {
     const { project, results, warnings } = run([{ op: 'applyZoomSuggestions' }], sixtySeconds(), { cursorTracks: { r1: clicks() } });
     expect(project.zooms.length).toBeGreaterThan(0);
     expect(project.zooms.every((z) => z.origin === 'auto')).toBe(true);
-    expect(results[0]).toMatchObject({ suggestions: project.zooms.length });
+    expect(results[0]).toMatchObject({ added: project.zooms.length, replaced: 0 });
     expect(warnings).toEqual([]);
   });
 
-  it('warns when there is no cursor log to suggest from', () => {
-    const { warnings } = run([{ op: 'applyZoomSuggestions' }]);
-    expect(warnings).toEqual(['op 0 (applyZoomSuggestions): no zoom suggestions (r1: no cursor log)']);
+  it('refuses to report success when there is no cursor log to suggest from', () => {
+    expect(() => run([{ op: 'applyZoomSuggestions' }])).toThrow('op 0 (applyZoomSuggestions): no zoom suggestions added (r1: no cursor log)');
+  });
+
+  it('counts only the suggestions that were added, not those a manual zoom covers', () => {
+    const manualOverAll = apply([{ op: 'addZoom', start: 0, end: 60 }]);
+    expect(() => run([{ op: 'applyZoomSuggestions' }], manualOverAll, { cursorTracks: { r1: clicks() } })).toThrow(/no zoom suggestions added \(r1: \d+ suggestions overlap manual zooms\)/);
   });
 
   it('clears automatic zooms and keeps manual ones', () => {

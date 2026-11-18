@@ -23,9 +23,7 @@ export function backupDir(dir: string): string {
   return join(dir, BACKUP_DIR);
 }
 
-async function keepBackup(dir: string, previous: string | Buffer): Promise<void> {
-  const file = join(dir, PROJECT_FILE);
-  await writeFileAtomic(`${file}.bak`, previous);
+async function keepBackupHistory(dir: string, previous: string): Promise<void> {
   const history = backupDir(dir);
   const existing = (await readdir(history).catch(() => [])).filter((n) => BACKUP_NAME.test(n)).sort();
   const next = existing.length ? Number(BACKUP_NAME.exec(existing.at(-1)!)![1]) + 1 : 1;
@@ -38,7 +36,7 @@ async function keepBackup(dir: string, previous: string | Buffer): Promise<void>
 export async function writeProjectTextKeepingBackup(dir: string, text: string): Promise<void> {
   const file = join(dir, PROJECT_FILE);
   const previous = await readFile(file).catch(() => null);
-  if (previous) await keepBackup(dir, previous);
+  if (previous) await writeFileAtomic(`${file}.bak`, previous);
   await writeFileAtomic(file, text);
 }
 
@@ -61,10 +59,10 @@ export async function writeProjectTextIfUnchanged(dir: string, expected: string,
   try {
     await writeSynced(tmp, text);
     if ((await readProjectText(dir)) !== expected) throw conflict();
-    await keepBackup(dir, expected);
-    if ((await readProjectText(dir)) !== expected) throw conflict();
     await rename(tmp, file);
   } finally {
     await rm(tmp, { force: true });
   }
+  await writeFileAtomic(`${file}.bak`, expected);
+  await keepBackupHistory(dir, expected);
 }

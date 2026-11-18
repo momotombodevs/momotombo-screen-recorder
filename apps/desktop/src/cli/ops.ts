@@ -1,11 +1,11 @@
 import {
   BACKGROUND_PRESETS, activeVariant, addCameraMoveAt, applyZoomSuggestions, clearAutoZooms, conflictsFor, createProject,
-  defaultPrivacyLook, defaultStyle, defaultVariants, itemTimelineRanges, laneRange, layoutSegments, moveSegment,
-  newCameraMoveLayout, pictureAspect, placeItem, presetTransition, removeCameraLayout, removeMagnifier, removePrivacy,
+  deepMerge, defaultPrivacyLook, defaultStyle, defaultVariants, itemTimelineRanges, laneRange, layoutSegments, moveSegment,
+  newCameraMoveLayout, pictureAspect, placeItem, privacyBounds, presetTransition, removeCameraLayout, removeMagnifier, removePrivacy,
   removeSegment, removeTimelineRange, removeZoom, renameProject, resolveCamera, sequenceDuration, setActiveVariant, setAudio,
   setCameraMovePosition, setStyle, setZoomSensitivity, sourceToTimeline, splitAt, trimSegment, updateCameraLayout,
   updateMagnifier, updatePrivacy, updateVariant, updateZoom,
-  type AudioMix, type CameraLayout, type CameraShape, type CursorTrack, type DeepPartial, type ItemBase, type PlaceResult,
+  type AudioMix, type Background, type CameraLayout, type CameraShape, type CursorTrack, type DeepPartial, type ItemBase, type PlaceResult,
   type Project, type Rect, type Style, type TrackItem, type TrackKey, type Variant, type Vec2,
 } from '@momotombo/project-model';
 import { secondsToTicks, ticksToSeconds, type Ticks } from '@momotombo/timing';
@@ -53,7 +53,7 @@ export const Op = z.discriminatedUnion('op', [
   z.strictObject({ op: z.literal('addMagnifier'), ...range, size: z.number().optional(), zoom: z.number().optional() }),
   z.strictObject({ op: z.literal('addCameraLayout'), ...range, layout: Patch.optional(), enter: z.enum(['smooth', 'fast']).optional() }),
   z.strictObject({ op: z.literal('addCameraMove'), at: Seconds, duration: Duration.optional(), first: CameraSpot.optional(), second: CameraSpot.optional() }),
-  z.strictObject({ op: z.literal('updateItem'), track: Track, id: Id, patch: Patch }),
+  z.strictObject({ op: z.literal('updateItem'), track: Track, id: Id, patch: Patch.optional(), start: Seconds.optional(), end: Seconds.optional() }),
   z.strictObject({ op: z.literal('removeItem'), track: Track, id: Id }),
   z.strictObject({ op: z.literal('setStyle'), patch: Patch }),
   z.strictObject({ op: z.literal('setAudio'), patch: Patch }),
@@ -86,6 +86,17 @@ export function parseOps(raw: unknown): Op[] {
   throw new OpError(lines.join('\n'));
 }
 
+const BACKGROUND_FIELDS = {
+  solid: ['color'], gradient: ['from', 'to', 'angle'], aurora: ['colors', 'seed', 'grain'], image: ['file', 'blur'],
+} as const satisfies Record<Background['kind'], readonly string[]>;
+
+const kindShapes = (fields: Record<string, readonly string[]>) =>
+  Object.entries(fields).map(([kind, keys]) => ({ kind, ...Object.fromEntries(keys.map((k) => [k, null])) }));
+const BACKGROUND_SHAPES = kindShapes(BACKGROUND_FIELDS);
+const PRIVACY_EFFECT_SHAPES = kindShapes(Object.fromEntries(
+  PrivacyEffect.options.map((o) => [o.shape.kind.value, Object.keys(o.shape).filter((k) => k !== 'kind')]),
+));
+
 type Obj = Record<string, unknown>;
 const isObj = (v: unknown): v is Obj => typeof v === 'object' && v !== null && !Array.isArray(v);
 
@@ -95,7 +106,7 @@ function unknownFields(patch: unknown, references: unknown[], path: string): str
   if (shapes.length === 0) return [];
   const kind = Object.hasOwn(patch, 'kind') ? patch.kind : shapes[0]!.kind;
   const matching = shapes.some((s) => Object.hasOwn(s, 'kind')) ? shapes.filter((s) => s.kind === kind) : shapes;
-  if (matching.length === 0) return [];
+  if (matching.length === 0) return [`${path}.kind (no kind ${JSON.stringify(kind)})`];
   return Object.entries(patch).flatMap(([key, value]) => {
     const here = path ? `${path}.${key}` : key;
     const inner = matching.filter((s) => Object.hasOwn(s, key)).map((s) => s[key]);
@@ -114,23 +125,45 @@ function strictPatch<T>(patch: Obj, references: unknown[], path: string, locked:
 const ITEM_LOCKED = ['id', 'type', 'recordingId', 'origin', 'start', 'end'] as const;
 const REMOVE_ITEM = { zooms: removeZoom, privacy: removePrivacy, magnifiers: removeMagnifier, cameraLayouts: removeCameraLayout };
 
-function itemReferences(track: TrackKey, item: TrackItem): unknown[] {
+function itemReferences(item: TrackItem): unknown[] {
+  if (item.type === 'privacy') return [item, ...PRIVACY_EFFECT_SHAPES.map((effect) => ({ effect }))];
   if (item.type !== 'camera') return [item];
   return [item, { second: { position: item.layout.position, size: item.layout.size }, split: 0.5 }];
 }
 
-function updateItem(p: Project, track: TrackKey, id: string, patch: Obj): Project {
-  const item = (p[track] as TrackItem[]).find((i) => i.id === id);
-  if (!item) return p;
-  const clean = strictPatch<TrackItem>(patch, itemReferences(track, item), track, ITEM_LOCKED);
-  const next = track === 'zooms' ? updateZoom(p, id, clean as never)
-    : track === 'privacy' ? updatePrivacy(p, id, clean as never)
-      : track === 'magnifiers' ? updateMagnifier(p, id, clean as never)
-        : updateCameraLayout(p, id, clean as never);
-  const updated = (next[track] as TrackItem[]).find((i) => i.id === id)!;
-  const overlap = conflictsFor(next, track, updated)[0];
+const findItem = (p: Project, track: TrackKey, id: string) => (p[track] as TrackItem[]).find((i) => i.id === id);
+
+function patchItem(p: Project, track: TrackKey, item: TrackItem, patch: Obj): Project {
+  const timed = ['start', 'end'].filter((k) => Object.hasOwn(patch, k));
+  if (timed.length) throw new OpError(`${timed.map((k) => `${track}.${k}`).join(', ')} cannot be changed with a patch; retime it with the op's start and end (timeline seconds)`);
+  const clean = strictPatch<TrackItem>(patch, itemReferences(item), track, ITEM_LOCKED);
+  const next = track === 'zooms' ? updateZoom(p, item.id, clean as never)
+    : track === 'privacy' ? updatePrivacy(p, item.id, clean as never)
+      : track === 'magnifiers' ? updateMagnifier(p, item.id, clean as never)
+        : updateCameraLayout(p, item.id, clean as never);
+  const before = new Set(conflictsFor(p, track, item).map((c) => c.id));
+  const overlap = conflictsFor(next, track, findItem(next, track, item.id)!).find((c) => !before.has(c.id));
   if (overlap) throw new OpError(`would overlap item ${overlap.id}`);
   return next;
+}
+
+function updateItem(p: Project, op: Extract<Op, { op: 'updateItem' }>): Step {
+  if (!op.patch && op.start === undefined && op.end === undefined) throw new OpError('give a patch, a new start or end, or both');
+  const item = findItem(p, op.track, op.id);
+  if (!item) return { project: p };
+  const next = op.patch ? patchItem(p, op.track, item, op.patch) : p;
+  if (op.start === undefined && op.end === undefined) return { project: next };
+  const current = findItem(next, op.track, op.id)!;
+  if (current.type === 'privacy' && current.keyframes.length > 0)
+    throw new OpError('a privacy area with keyframes cannot be retimed (its keyframes are tied to recording time); remove it and add it again');
+  const shown = shownRanges(next, current);
+  if ((op.start === undefined || op.end === undefined) && shown.length === 0)
+    throw new OpError('the item is not on the timeline; give both start and end');
+  const asked = { start: op.start ?? shown[0]!.start, end: op.end ?? shown[shown.length - 1]!.end };
+  const without = REMOVE_ITEM[op.track](next, op.id);
+  const { type: _type, ...rest } = current;
+  const range = freeRange(without, op.track, asked, current.type === 'privacy' ? privacyBounds(current) : undefined);
+  return placed(placeItem(without, op.track, { ...rest, ...range } as never), op.track, asked);
 }
 
 function freeRange(p: Project, track: TrackKey, op: { start: number; end: number }, region?: Rect): Pick<ItemBase, 'recordingId' | 'start' | 'end' | 'origin'> {
@@ -207,7 +240,8 @@ export interface OpContext {
 
 function suggest(p: Project, recordingId: string | undefined, ctx: OpContext): Step {
   let next = p;
-  let count = 0;
+  let added = 0;
+  let replaced = 0;
   const reasons: string[] = [];
   for (const rec of recordingsFor(p, recordingId)) {
     const track = ctx.cursorTracks?.[rec.id] ?? null;
@@ -216,12 +250,21 @@ function suggest(p: Project, recordingId: string | undefined, ctx: OpContext): S
       recordingId: rec.id, duration: rec.duration, track, hasClicks: rec.capture.hasClicks, markers: rec.markers,
       sensitivity: p.zoomEngine.sensitivity, defaults: p.style.zoomDefaults,
     });
-    if (items.length === 0) reasons.push(`${rec.id}: ${whyNoSuggestions(track, rec.capture.hasClicks)}`);
-    next = applyZoomSuggestions(next, rec.id, items);
-    count += items.length;
+    if (items.length === 0) { reasons.push(`${rec.id}: ${whyNoSuggestions(track, rec.capture.hasClicks)}`); continue; }
+    const known = new Set(next.zooms.map((z) => z.id));
+    const after = applyZoomSuggestions(next, rec.id, items);
+    const fresh = after.zooms.filter((z) => !known.has(z.id)).length;
+    if (fresh === 0) { reasons.push(`${rec.id}: ${items.length} suggestions overlap manual zooms`); continue; }
+    replaced += next.zooms.filter((z) => z.recordingId === rec.id && z.origin === 'auto').length;
+    added += fresh;
+    next = after;
   }
-  next = { ...next, zoomEngine: { ...next.zoomEngine, engineVersion: ENGINE_VERSION } };
-  return { project: next, note: { suggestions: count }, ...(count === 0 ? { warning: `no zoom suggestions (${reasons.join('; ')})` } : {}) };
+  if (added === 0) throw new OpError(`no zoom suggestions added (${reasons.join('; ')})`);
+  return {
+    project: { ...next, zoomEngine: { ...next.zoomEngine, engineVersion: ENGINE_VERSION } },
+    note: { added, replaced },
+    ...(reasons.length ? { warning: `some recordings got no suggestions (${reasons.join('; ')})` } : {}),
+  };
 }
 
 function trim(p: Project, op: Extract<Op, { op: 'trimSegment' }>): Step {
@@ -280,7 +323,7 @@ function applyOp(p: Project, op: Op, ctx: OpContext): Step {
       const base = newCameraMoveLayout(p);
       const look = op.layout ? strictPatch<CameraLayout>(op.layout, [base, p.style.camera], 'layout') : {};
       return placed(placeItem(p, 'cameraLayouts', {
-        ...freeRange(p, 'cameraLayouts', op), layout: { ...base, ...(look as Partial<CameraLayout>) }, enter: presetTransition(op.enter ?? 'smooth'),
+        ...freeRange(p, 'cameraLayouts', op), layout: deepMerge<CameraLayout>(base, look as DeepPartial<CameraLayout>), enter: presetTransition(op.enter ?? 'smooth'),
       }), 'cameraLayouts', op);
     }
     case 'addCameraMove': {
@@ -292,10 +335,12 @@ function applyOp(p: Project, op: Op, ctx: OpContext): Step {
       if (op.second) next = setCameraMovePosition(next, added.id, 2, op.second);
       return { project: next, added: { track: 'cameraLayouts', id: added.id, asked: { start: op.at, end: op.at + duration } } };
     }
-    case 'updateItem': return { project: updateItem(p, op.track, op.id, op.patch) };
+    case 'updateItem': return updateItem(p, op);
     case 'removeItem': return { project: REMOVE_ITEM[op.track](p, op.id) };
     case 'setStyle': {
-      const references = [p.style, defaultStyle(), ...BACKGROUND_PRESETS.map((b) => ({ background: b.background }))];
+      const references = [
+        p.style, defaultStyle(), ...BACKGROUND_PRESETS.map((b) => ({ background: b.background })), ...BACKGROUND_SHAPES.map((background) => ({ background })),
+      ];
       return { project: setStyle(p, strictPatch<Style>(op.patch, references, 'style')) };
     }
     case 'setAudio':
