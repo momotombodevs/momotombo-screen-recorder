@@ -112,6 +112,7 @@ final class MicSource: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate {
     private let session = AVCaptureSession()
     private(set) var deviceName = ""
     private(set) var level: Float = 0
+    private var peak: Float = 0
     var onAudio: ((CMSampleBuffer, Double) -> Void)?
 
     func prepare(label: String?, completion: @escaping (Error?) -> Void) {
@@ -154,26 +155,41 @@ final class MicSource: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate {
     }
 
     func captureOutput(_ output: AVCaptureOutput, didOutput sample: CMSampleBuffer, from connection: AVCaptureConnection) {
-        level = max(level * 0.85, rmsLevel(sample))
+        let m = meterLevels(sample)
+        level = max(level * 0.85, m.rms)
+        peak = max(peak, m.peak)
         onAudio?(sample, hostSeconds(CMSampleBufferGetPresentationTimeStamp(sample), session: session))
     }
 
     func stop() {
         queue.sync { session.stopRunning() }
     }
+
+    /// The loudest sample since the previous call.
+    func takePeak() -> Float {
+        queue.sync {
+            let p = peak
+            peak = 0
+            return p
+        }
+    }
 }
 
-/// 0..1 loudness of a float PCM buffer (for the level meter only).
-func rmsLevel(_ sample: CMSampleBuffer) -> Float {
-    guard let block = CMSampleBufferGetDataBuffer(sample) else { return 0 }
+/// Linear RMS and absolute peak (0..1) of a float PCM buffer, for the level meter only.
+func meterLevels(_ sample: CMSampleBuffer) -> (rms: Float, peak: Float) {
+    guard let block = CMSampleBufferGetDataBuffer(sample) else { return (0, 0) }
     var length = 0
     var pointer: UnsafeMutablePointer<CChar>?
     guard CMBlockBufferGetDataPointer(block, atOffset: 0, lengthAtOffsetOut: nil, totalLengthOut: &length, dataPointerOut: &pointer) == kCMBlockBufferNoErr,
-          let p = pointer, length >= 4 else { return 0 }
+          let p = pointer, length >= 4 else { return (0, 0) }
     let count = length / 4
     return p.withMemoryRebound(to: Float.self, capacity: count) { f in
         var sum: Float = 0
-        for k in 0..<count { sum += f[k] * f[k] }
-        return min(1, sqrt(sum / Float(count)) * 4)
+        var peak: Float = 0
+        for k in 0..<count {
+            sum += f[k] * f[k]
+            peak = max(peak, abs(f[k]))
+        }
+        return (min(1, sqrt(sum / Float(count))), min(1, peak))
     }
 }

@@ -24,7 +24,7 @@ import { getPermissions, openPermissionSettings, requestPermission } from './per
 import { appIcon, circleIcon } from './png';
 import { shortcutLabel } from '../shared/shortcut-label';
 import { suiteFromArgv } from '../shared/test-suite';
-import { getLastExportFolder, loadSettings, onSettingsChanged, setLastExportFolder, settingsInfo, tm, updateSettings } from './settings';
+import { getLastExportFolder, loadSettings, onSettingsChanged, setLastExportFolder, recorderPrefs, settingsInfo, tm, updateRecorderPrefs, updateSettings } from './settings';
 import { ProjectStore } from './projects';
 import { createCaptureWindow, createMainWindow, hideHud, hudWindow, showHud } from './windows';
 import { activateDll, askForTerms, dllFiles, recordAcceptance, startupAction, tellActivationFailed, termsAccepted } from './windows-terms';
@@ -204,6 +204,9 @@ function registerIpc(): void {
   handle('capture:start', async (config) => {
     await capture.start(config);
   });
+  handle('capture:diskEstimate', (config) => capture.diskEstimate(config));
+  handleNoArgs('recorder:prefs', () => recorderPrefs());
+  handle('recorder:setPrefs', (patch) => updateRecorderPrefs(patch));
   handleNoArgs('capture:pause', () => capture.pause());
   handleNoArgs('capture:resume', () => capture.resume());
   handleNoArgs('capture:mark', () => capture.mark());
@@ -228,7 +231,7 @@ function registerIpc(): void {
   fromWorker('cw:started', CaptureWorker.started, (p) => capture.web.onStarted(p.startedAtMs));
   fromWorker('cw:ready', CaptureWorker.ready, () => capture.web.onReady());
   fromWorker('cw:busy', CaptureWorker.busy, () => capture.web.onBusy());
-  fromWorker('cw:level', CaptureWorker.level, (p) => capture.web.onLevel(p.mic));
+  fromWorker('cw:level', CaptureWorker.level, (p) => capture.web.onLevel(p.mic, p.peak));
   fromWorker('cw:failed', CaptureWorker.failed, (p) => capture.web.onFailed(p.message));
 
   // Export. While an export runs its window keeps decoding and drawing at full speed even in the

@@ -134,7 +134,7 @@ export class NativeMacBackend extends EventEmitter implements CaptureBackend {
 
   private onMessage(m: HelperMessage): void {
     if (m.type === "status") {
-      this.emit("level", m.micLevel);
+      this.emit("level", m.micLevel, m.micPeak ?? m.micLevel);
       this.emit("status", { droppedFrames: m.dropped });
     } else if (m.type === "interrupted") {
       // macOS ended the screen stream (permission withdrawn, display gone, …): keep what was recorded.

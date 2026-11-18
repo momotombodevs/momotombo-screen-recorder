@@ -12,6 +12,13 @@ import type {
   SourceInfo,
 } from "@momotombo/protocol";
 import { localeOf, msg } from "../../shared/i18n";
+import {
+  diskBudget,
+  minutesLeft,
+  recordingBytesPerSecond,
+  stopBelowBytes,
+  type DiskEstimate,
+} from "../../shared/recording-budget";
 import type { ProjectStore } from "../projects";
 import { currentLang, tm } from "../settings";
 import type { ProbedFile } from "./helper-client";
@@ -37,6 +44,8 @@ export interface ManagerDeps {
   onSessionStart?: (targetKind: "display" | "window" | "region") => void;
   /** Resolves once it is safe to record (e.g. minimize animations have finished). */
   beforeRecording?: () => Promise<void>;
+  /** Free bytes on the volume holding `dir`. */
+  diskFree?: (dir: string) => Promise<number>;
 }
 
 type Session = {
@@ -44,6 +53,7 @@ type Session = {
   recordingId: string;
   outDir: string;
   startedAt: number;
+  bytesPerSecond: number;
 };
 type Recovered = Extract<FolderResult, { status: "recovered" }>;
 
@@ -52,9 +62,12 @@ const IDLE: CaptureState = {
   backend: null,
   elapsedMs: 0,
   countdown: 0,
+  hasMic: false,
   micLevel: 0,
+  micPeak: 0,
   droppedFrames: 0,
   diskFreeBytes: null,
+  diskMinutesLeft: null,
   devicesReady: false,
 };
 
@@ -80,14 +93,16 @@ export class CaptureManager extends EventEmitter {
   /** Bumped by every start and cancel: a start() whose number is no longer current stops at its next await. */
   private attempt = 0;
   private toggling = false;
+  private peakSinceTick = 0;
 
   constructor(private readonly deps: ManagerDeps) {
     super();
     this.web = new WebCaptureBackend(deps.createCaptureWindow);
     this.native = new NativeMacBackend();
     for (const b of [this.web, this.native] as CaptureBackend[]) {
-      b.on("level", (v: number) => {
-        this.state.micLevel = v;
+      b.on("level", (rms: number, peak: number) => {
+        this.state.micLevel = rms;
+        this.peakSinceTick = Math.max(this.peakSinceTick, peak);
       });
       b.on("status", (s: { droppedFrames: number }) => {
         this.state.droppedFrames = s.droppedFrames;
@@ -170,15 +185,68 @@ export class CaptureManager extends EventEmitter {
     return this.native.info.available ? this.native : this.web;
   }
 
+  private async freeBytes(dir: string): Promise<number | null> {
+    try {
+      if (this.deps.diskFree) return await this.deps.diskFree(dir);
+      const s = await statfs(dir);
+      return s.bavail * s.bsize;
+    } catch {
+      return null;
+    }
+  }
+
+  private bytesPerSecond(config: CaptureConfig, backend: CaptureBackend): number {
+    const t = config.target;
+    const display =
+      screen.getAllDisplays().find((d) => String(d.id) === t.displayId) ??
+      screen.getPrimaryDisplay();
+    const area =
+      t.kind === "region" && t.region
+        ? t.region.w * t.region.h
+        : display.bounds.width * display.bounds.height;
+    return recordingBytesPerSecond({
+      backend: backend.info.id,
+      quality: config.quality,
+      fps: config.fps,
+      pixels: area * display.scaleFactor ** 2,
+      camera: config.cameraDeviceId !== null,
+      mic: config.micDeviceId !== null,
+      systemAudio: config.systemAudio,
+    });
+  }
+
+  async diskEstimate(config: CaptureConfig): Promise<DiskEstimate> {
+    let backend: CaptureBackend;
+    try {
+      backend = this.pickBackend(config);
+    } catch {
+      backend = this.web;
+    }
+    const free = await this.freeBytes(this.deps.store.root);
+    if (free === null) return { level: "unknown", freeBytes: null, minutesLeft: null };
+    return { ...diskBudget(free, this.bytesPerSecond(config, backend)), freeBytes: free };
+  }
+
   async start(config: CaptureConfig): Promise<void> {
     if (this.state.phase !== "idle" && this.state.phase !== "error")
       throw new Error(tm("Ya hay una grabación en curso"));
     const backend = this.pickBackend(config);
     const attempt = ++this.attempt;
     const live = () => this.attempt === attempt;
-    this.set({ ...IDLE, phase: "preparing", backend: backend.info.id });
+    this.set({
+      ...IDLE,
+      phase: "preparing",
+      backend: backend.info.id,
+      hasMic: config.micDeviceId !== null,
+    });
     let backendTouched = false;
     try {
+      const disk = await this.diskEstimate(config);
+      if (!live()) return;
+      if (disk.level === "insufficient")
+        throw new Error(
+          tm("No hay suficiente espacio en disco para grabar. Libera espacio e inténtalo de nuevo."),
+        );
       const store = this.deps.store;
       const projectId =
         config.projectId ??
@@ -208,7 +276,13 @@ export class CaptureManager extends EventEmitter {
               h: t.region.h,
             }
           : displayBounds;
-      this.session = { projectId, recordingId, outDir, startedAt: Date.now() };
+      this.session = {
+        projectId,
+        recordingId,
+        outDir,
+        startedAt: Date.now(),
+        bytesPerSecond: this.bytesPerSecond(config, backend),
+      };
 
       const args = {
         config,
@@ -291,20 +365,25 @@ export class CaptureManager extends EventEmitter {
   private async tick(): Promise<void> {
     const running =
       this.state.phase === "recording" ? Date.now() - this.runningSince : 0;
-    let diskFreeBytes: number | null = this.state.diskFreeBytes;
-    if (this.session) {
-      try {
-        const s = await statfs(this.session.outDir);
-        diskFreeBytes = s.bavail * s.bsize;
-      } catch {
-        /* keep last */
-      }
-    }
-    this.set({ elapsedMs: this.elapsedBase + running, diskFreeBytes });
-    // Stop cleanly before the disk fills up.
+    const session = this.session;
+    const diskFreeBytes =
+      (session && (await this.freeBytes(session.outDir))) ??
+      this.state.diskFreeBytes;
+    const micPeak = this.peakSinceTick;
+    this.peakSinceTick = 0;
+    this.set({
+      elapsedMs: this.elapsedBase + running,
+      micPeak,
+      diskFreeBytes,
+      diskMinutesLeft:
+        session && diskFreeBytes !== null
+          ? minutesLeft(diskFreeBytes, session.bytesPerSecond)
+          : null,
+    });
     if (
+      session &&
       diskFreeBytes !== null &&
-      diskFreeBytes < 1.5 * 1024 ** 3 &&
+      diskFreeBytes < stopBelowBytes(session.bytesPerSecond) &&
       this.state.phase === "recording"
     ) {
       this.set({

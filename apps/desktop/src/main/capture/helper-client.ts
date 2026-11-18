@@ -35,7 +35,7 @@ export type HelperMessage =
   | { type: 'hello'; version: string; arch?: string }
   | { type: 'ready'; screenWidth?: number; screenHeight?: number; camera?: string; mic?: string }
   | { type: 'started'; startedAtMs: number }
-  | { type: 'status'; elapsedMs: number; micLevel: number; dropped: number }
+  | { type: 'status'; elapsedMs: number; micLevel: number; micPeak?: number; dropped: number }
   | { type: 'interrupted'; code: string; message: string }
   | {
       type: 'stopped'; durationMs: number; files: HelperFile[]; cursor: string | null; markers: number[];

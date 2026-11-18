@@ -5,6 +5,9 @@
  */
 import type { CaptureConfig } from '@momotombo/protocol';
 import { acquire, warmUpCamera } from './capture-devices';
+import { measure } from './mic-meter';
+import { micConstraints } from './recorder-inputs';
+import { webVideoBitrate } from '../shared/recording-budget';
 import { initI18n, t } from './i18n';
 import { PROFILE } from '../shared/distribution';
 import { FrameWatch } from './frame-watch';
@@ -44,21 +47,14 @@ function pickMime(kind: Kind): string {
   return list.find((m) => MediaRecorder.isTypeSupported(m)) ?? '';
 }
 
-function bitrate(kind: Kind, quality: CaptureConfig['quality'], pixels: number): number {
-  if (kind === 'mic' || kind === 'system') return 160_000;
-  if (kind === 'camera') return quality === 'max' ? 10e6 : quality === 'high' ? 7e6 : 4e6;
-  const base = pixels > 6e6 ? 30e6 : pixels > 3e6 ? 20e6 : 12e6;
-  return quality === 'max' ? base * 1.5 : quality === 'high' ? base : base * 0.6;
-}
-
 async function record(kind: Kind, stream: MediaStream, watch: FrameWatch, config: CaptureConfig, pixels: number): Promise<Active> {
   const mime = pickMime(kind);
   const handle = (await bridge.invoke('cw:open', { kind, mime: mime || 'video/webm' })) as string;
   const opts: MediaRecorderOptions & { videoKeyFrameIntervalDuration?: number } = {
     mimeType: mime || undefined,
     ...(kind === 'screen' || kind === 'camera'
-      ? { videoBitsPerSecond: bitrate(kind, config.quality, pixels), videoKeyFrameIntervalDuration: 1000 }
-      : { audioBitsPerSecond: bitrate(kind, config.quality, pixels) }),
+      ? { videoBitsPerSecond: webVideoBitrate(kind, config.quality, pixels), videoKeyFrameIntervalDuration: 1000 }
+      : { audioBitsPerSecond: webVideoBitrate(kind, config.quality, pixels) }),
   };
   const recorder = new MediaRecorder(stream, opts);
   const a: Active = { kind, recorder, handle, stream, watch, done: Promise.resolve() };
@@ -198,20 +194,17 @@ bridge.on('cw:prepare', async (raw) => {
       items.push(['camera', cam]);
     }
     if (config.micDeviceId) {
-      const mic = held.track(await acquire('mic', onBusy, {
-        audio: { deviceId: { exact: config.micDeviceId }, echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 1 },
-      }));
+      const mic = held.track(await acquire('mic', onBusy, micConstraints(config.micDeviceId)));
       items.push(['mic', mic]);
       audioCtx = held.closeLater(new AudioContext());
       const an = audioCtx.createAnalyser();
-      an.fftSize = 1024;
+      an.fftSize = 8192;
       audioCtx.createMediaStreamSource(mic).connect(an);
       const buf = new Float32Array(an.fftSize);
       levelTimer = held.interval(window.setInterval(() => {
         an.getFloatTimeDomainData(buf);
-        let sum = 0;
-        for (const v of buf) sum += v * v;
-        void bridge.invoke('cw:level', { mic: Math.min(1, Math.sqrt(sum / buf.length) * 4) });
+        const { rms, peak } = measure(buf);
+        void bridge.invoke('cw:level', { mic: Math.min(1, rms), peak });
       }, 120));
     }
     // Each track is watched from now on, so its first recorded frame can be timed at the start.

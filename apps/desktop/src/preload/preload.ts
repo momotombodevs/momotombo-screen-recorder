@@ -8,6 +8,7 @@ const INVOKE = new Set([
   'permissions:get', 'permissions:request', 'permissions:openSettings',
   'capture:backends', 'capture:sources', 'capture:state', 'capture:start', 'capture:pause', 'capture:resume',
   'capture:mark', 'capture:stop', 'capture:cancel', 'capture:dismissError', 'capture:recoveries', 'capture:dismissRecovery',
+  'capture:diskEstimate', 'recorder:prefs', 'recorder:setPrefs',
   'cw:open', 'cw:chunk', 'cw:close', 'cw:started', 'cw:level', 'cw:failed', 'cw:ready', 'cw:busy',
   'export:defaultTarget', 'export:chooseTarget', 'export:encoderInfo', 'export:mfBegin', 'export:mfWrite', 'export:begin', 'export:write', 'export:end', 'shell:showItem', 'settings:get', 'settings:set',
   'licenses:get', 'licenses:openChromium', 'licenses:openNotices',
