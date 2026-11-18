@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { secondsToTicks as sec } from '@momotombo/timing';
 import {
-  MAGNIFIER_LIMITS, addMagnifier, addRecording, addZoom, createProject, evaluate, laneRange, magnifierSampling, parseProject,
+  MAGNIFIER_LIMITS, ProjectFormatError, addMagnifier, defaultMagnifier, validateProject, addRecording, addZoom, createProject, evaluate, laneRange, magnifierSampling, parseProject,
   placeItem, prepareCursor, presetTransition, removeMagnifier, removeSegment, resolveOverlaps, serializeProject, setStyle,
   sourceToCanvas, splitAt, updateMagnifier, type CursorSample, type DeepPartial, type MagnifierStyle, type NewMagnifier,
   type PreparedCursor, type Project, type Recording,
@@ -91,6 +91,42 @@ describe('magnifier ranges', () => {
     expect(m.rect.w).toBeCloseTo(200);
     expect(m.radius).toBeCloseTo(200 * 0.18);
     expect(m.border).toEqual({ width: 2.5, color: '#FF0000' });
+  });
+
+  it('starts new ranges and the shared look inside the limits', () => {
+    const d = defaultMagnifier();
+    const L = MAGNIFIER_LIMITS;
+    expect(d.size).toBeGreaterThanOrEqual(L.size.min);
+    expect(d.size).toBeLessThanOrEqual(L.size.max);
+    expect(d.zoom).toBeGreaterThanOrEqual(L.zoom.min);
+    expect(d.zoom).toBeLessThanOrEqual(L.zoom.max);
+    expect(d.border.width).toBeLessThanOrEqual(L.border.max);
+    expect(() => validateProject(project())).not.toThrow();
+  });
+
+  it.each([
+    ['a range zoom below the minimum', project({ zoom: -1 }), 'magnifiers[0].zoom', { kind: 'min', limit: 1.25 }],
+    ['a range size above the maximum', project({ size: 1000 }), 'magnifiers[0].size', { kind: 'max', limit: 560 }],
+    ['a shared size below the minimum', project({}, { size: 50 }), 'style.magnifier.size', { kind: 'min', limit: 120 }],
+    ['a shared zoom above the maximum', project({}, { zoom: 9 }), 'style.magnifier.zoom', { kind: 'max', limit: 4 }],
+    ['a shared border above the maximum', project({}, { border: { width: 20 } }), 'style.magnifier.border.width', { kind: 'max', limit: 8 }],
+  ])('rejects %s, naming the field and limit', (_name, p, field, rule) => {
+    let error: unknown;
+    try {
+      validateProject(p);
+    } catch (e) {
+      error = e;
+    }
+    expect(error).toBeInstanceOf(ProjectFormatError);
+    expect(error).toMatchObject({ field, rule });
+  });
+
+  it('still opens a saved file with settings out of range, brought to the limits it was already drawn with', () => {
+    const json = JSON.parse(serializeProject(project({ size: 99_999, zoom: 0.2 }, { size: 10, zoom: 40, border: { width: 30 } })));
+    const opened = parseProject(json);
+    expect(opened.magnifiers[0]).toMatchObject({ size: MAGNIFIER_LIMITS.size.max, zoom: MAGNIFIER_LIMITS.zoom.min });
+    expect(opened.style.magnifier).toMatchObject({ size: MAGNIFIER_LIMITS.size.min, zoom: MAGNIFIER_LIMITS.zoom.max, border: { width: MAGNIFIER_LIMITS.border.max } });
+    expect(() => validateProject(opened)).not.toThrow();
   });
 
   it('keeps settings in range, even from a hand-edited file', () => {

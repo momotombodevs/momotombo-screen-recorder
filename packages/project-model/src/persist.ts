@@ -1,5 +1,5 @@
 import { deepMerge, type DeepPartial } from "./commands";
-import { defaultAudio, defaultStyle, defaultVariants } from "./factory";
+import { MAGNIFIER_LIMITS, defaultAudio, defaultStyle, defaultVariants } from "./factory";
 import type { Project } from "./types";
 import { MAX_AUDIO_GAIN, SCHEMA_VERSION } from "./types";
 import {
@@ -27,6 +27,9 @@ export { ProjectFormatError, type FormatRule };
  * (wrong types, non-finite or out-of-range numbers, empty ranges) throws ProjectFormatError
  * naming the field.
  */
+const intoRange = (v: unknown, r: { min: number; max: number }) =>
+  typeof v === "number" && Number.isFinite(v) ? Math.min(r.max, Math.max(r.min, v)) : v;
+
 export function parseProject(json: unknown): Project {
   if (!isObj(json))
     throw new ProjectFormatError("El archivo del proyecto no es un objeto.");
@@ -58,6 +61,10 @@ export function parseProject(json: unknown): Project {
     defaultStyle(),
     (isObj(json.style) ? json.style : {}) as DeepPartial<Project["style"]>,
   );
+  const lens = style.magnifier as unknown as Record<string, unknown>;
+  lens.size = intoRange(lens.size, MAGNIFIER_LIMITS.size);
+  lens.zoom = intoRange(lens.zoom, MAGNIFIER_LIMITS.zoom);
+  if (isObj(lens.border)) lens.border = { ...lens.border, width: intoRange(lens.border.width, MAGNIFIER_LIMITS.border) };
   validateStyle(style);
   const audio = deepMerge<Project["audio"]>(
     defaultAudio(),
@@ -88,7 +95,13 @@ export function parseProject(json: unknown): Project {
     zooms: validateZooms(json.zooms),
     cameraLayouts: validateCameraLayouts(json.cameraLayouts),
     privacy: validatePrivacy(json.privacy),
-    magnifiers: validateMagnifiers(json.magnifiers),
+    magnifiers: validateMagnifiers(
+      Array.isArray(json.magnifiers)
+        ? json.magnifiers.map((m) =>
+            isObj(m) ? { ...m, size: intoRange(m.size, MAGNIFIER_LIMITS.size), zoom: intoRange(m.zoom, MAGNIFIER_LIMITS.zoom) } : m,
+          )
+        : json.magnifiers,
+    ),
     texts: validateTexts(json.texts),
     style,
     variants,
