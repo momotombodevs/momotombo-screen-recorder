@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type PointerEvent as RPointerEvent, type ReactNode } from 'react';
 import {
   DEFAULT_CAMERA_MOVE, cameraSplitTime, clampDrag, freeWindow, itemTimelineRanges, laneRange, layoutSegments, sequenceDuration, sourceToTimeline, splitAt,
-  trimSegment, updateCameraLayout, updateMagnifier, updatePrivacy, updateZoom, type ID, type ItemBase, type TrackItem, type TrackKey,
+  trimSegment, updateCameraLayout, updateMagnifier, updatePrivacy, updateText, updateZoom, type ID, type ItemBase, type TrackItem, type TrackKey,
 } from '@momotombo/project-model';
 import { TICKS_PER_SECOND, formatTimecode, secondsToTicks, snapToFrame, type Ticks } from '@momotombo/timing';
 import type { Player } from '../../playback/player';
@@ -17,11 +17,12 @@ import { probe } from '../../perf-probe';
 const LABEL_W = 140;
 const DRAG_THRESHOLD = 3; // px before a press becomes a drag
 
-type ItemKind = 'zoom' | 'privacy' | 'camera' | 'magnifier';
+type ItemKind = 'zoom' | 'privacy' | 'camera' | 'magnifier' | 'text';
 /** Rows that new items are added to from the timeline. */
-type DrawLane = 'zoom' | 'camera' | 'privacy' | 'magnifier';
-const LANE_KEY: Record<DrawLane, TrackKey> = { zoom: 'zooms', camera: 'cameraLayouts', privacy: 'privacy', magnifier: 'magnifiers' };
-const TRACK: Record<ItemKind, TrackKey> = { zoom: 'zooms', privacy: 'privacy', camera: 'cameraLayouts', magnifier: 'magnifiers' };
+type DrawLane = ItemKind;
+const LANE_KEY: Record<DrawLane, TrackKey> = { zoom: 'zooms', camera: 'cameraLayouts', privacy: 'privacy', magnifier: 'magnifiers', text: 'texts' };
+const TRACK = LANE_KEY;
+const isItemKind = (k: string): k is ItemKind => Object.hasOwn(TRACK, k);
 /** Fade drawn at both ends of a magnifier range (the lens fades in and out). */
 const MAGNIFIER_RAMP = secondsToTicks(0.25);
 
@@ -37,7 +38,7 @@ interface Drag {
   active: boolean;
 }
 
-/** Assigns time-overlapping items (allowed only for privacy areas in different places) to lanes. */
+/** Assigns time-overlapping items (texts, and privacy areas in different places) to lanes. */
 function lanes<T extends { start: number; end: number }>(items: T[]): number[] {
   const ends: number[] = [];
   return items.map((it) => {
@@ -81,7 +82,7 @@ export function Timeline({ store, player }: { store: EditorStore; player: Player
       if (await importVideo(store)) requestAnimationFrame(() => { const el = scrollRef.current; if (el) el.scrollLeft = el.scrollWidth; });
     } finally { setImporting(false); }
   };
-  const addLane: DrawLane | null = tool === 'zoom' ? 'zoom' : tool === 'camera' ? 'camera' : tool === 'privacy' ? 'privacy' : tool === 'magnifier' ? 'magnifier' : null;
+  const addLane: DrawLane | null = isItemKind(tool) ? tool : null;
   const scrollRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<Drag | null>(null);
   const cleanupRef = useRef<(() => void) | null>(null);
@@ -192,6 +193,7 @@ export function Timeline({ store, player }: { store: EditorStore; player: Player
     if (d.kind === 'privacy') store.apply((p) => updatePrivacy(p, d.id!, patch), { coalesce: key });
     if (d.kind === 'camera') store.apply((p) => updateCameraLayout(p, d.id!, patch), { coalesce: key });
     if (d.kind === 'magnifier') store.apply((p) => updateMagnifier(p, d.id!, patch), { coalesce: key });
+    if (d.kind === 'text') store.apply((p) => updateText(p, d.id!, patch), { coalesce: key });
   };
 
   /** Press on an item, an edge, or the playhead. Tracking runs on the window so it never gets stuck. */
@@ -200,7 +202,7 @@ export function Timeline({ store, player }: { store: EditorStore; player: Player
     // With a tool on, pressing an item of another kind adds the tool's item at that moment.
     const lane = toolLane();
     const itemKind = d.kind === 'split' ? 'camera' : d.kind;
-    if (lane && (itemKind === 'zoom' || itemKind === 'privacy' || itemKind === 'camera' || itemKind === 'magnifier') && itemKind !== lane) {
+    if (lane && isItemKind(itemKind) && itemKind !== lane) {
       addPress(e, lane, true);
       return;
     }
@@ -213,7 +215,7 @@ export function Timeline({ store, player }: { store: EditorStore; player: Player
     if (d.kind === 'split') {
       const item = store.project.cameraLayouts.find((i) => i.id === d.id);
       if (item) win = { lo: cameraSplitTime(item), hi: cameraSplitTime(item) }; // split time at press
-    } else if (d.kind === 'zoom' || d.kind === 'privacy' || d.kind === 'camera' || d.kind === 'magnifier') {
+    } else if (isItemKind(d.kind)) {
       const item = (store.project[TRACK[d.kind]] as TrackItem[]).find((i) => i.id === d.id);
       if (item) win = freeWindow(store.project, TRACK[d.kind], item);
     }
@@ -253,15 +255,16 @@ export function Timeline({ store, player }: { store: EditorStore; player: Player
     };
   };
 
-  /** Row the active tool adds to: Zoom → zoom row, Lens → magnifier row, Dynamic camera → camera row, Hide → privacy row. */
+  /** Row the active tool adds to: Zoom → zoom row, Lens → magnifier row, Dynamic camera → camera row, Hide → privacy row, Text → text row. */
   const toolLane = (): DrawLane | null => {
     const tl = store.getState().tool;
-    return tl === 'zoom' ? 'zoom' : tl === 'camera' ? 'camera' : tl === 'privacy' ? 'privacy' : tl === 'magnifier' ? 'magnifier' : null;
+    return isItemKind(tl) ? tl : null;
   };
   const rangeOn = (lane: DrawLane, from: Ticks, to: Ticks) =>
     laneRange(store.project, LANE_KEY[lane], from, to, lane === 'privacy' ? DEFAULT_PRIVACY_REGION : undefined);
   const noRoom = (lane: DrawLane) => store.notify(lane === 'camera' ? t("Aquí no hay espacio para un nuevo movimiento de cámara.")
-    : lane === 'zoom' ? t("Aquí no hay espacio para un nuevo zoom.") : lane === 'magnifier' ? t("Aquí no hay espacio para un nuevo intervalo de lupa.") : t("Aquí no hay espacio para una nueva área de privacidad."));
+    : lane === 'zoom' ? t("Aquí no hay espacio para un nuevo zoom.") : lane === 'magnifier' ? t("Aquí no hay espacio para un nuevo intervalo de lupa.")
+      : lane === 'text' ? t("Aquí no hay espacio para un nuevo texto.") : t("Aquí no hay espacio para una nueva área de privacidad."));
 
   /** Adds a default-length item for `lane` starting at timeline time `from`. */
   const addAt = (lane: DrawLane, from: Ticks) => {
@@ -363,6 +366,15 @@ export function Timeline({ store, player }: { store: EditorStore; player: Player
         className={`tl-item tl-${kind}${selected ? ' is-selected' : ''}${it.auto ? ' is-auto' : ''}`}
         style={{ left, width: w, top: 3 + layout.laneOf[i]! * laneHeight, height: laneHeight - 6, ['--ramp-in' as string]: `${rampIn}px`, ['--ramp-out' as string]: `${rampOut}px` }}
         onPointerDown={(e) => press(e, { kind, id: it.id, mode: 'move', start0: it.start, end0: it.end })}
+        onKeyDown={(e) => {
+          if (e.key !== 'Enter' && e.key !== ' ') return;
+          e.preventDefault();
+          e.stopPropagation();
+          store.select({ kind, id: it.id });
+        }}
+        role="button"
+        tabIndex={0}
+        aria-label={it.label}
         title={it.label}
       >
         <span className="tl-grip start" onPointerDown={(e) => press(e, { kind, id: it.id, mode: 'start', start0: it.start, end0: it.end })} />
@@ -390,6 +402,10 @@ export function Timeline({ store, player }: { store: EditorStore; player: Player
   })));
   const magnifierLayout = blockLayout(project.magnifiers.map((m) => ({
     ...m, label: `${m.zoom.toFixed(1)}× · ${Math.round(m.size)} px`, ramp: [MAGNIFIER_RAMP, MAGNIFIER_RAMP] as [number, number],
+  })));
+  const textLayout = blockLayout(project.texts.map((it) => ({
+    ...it, label: it.text.split('\n').find((l) => l.trim()) ?? t("Texto"),
+    ramp: [it.enter.kind === 'none' ? 0 : it.enter.duration, it.exit.kind === 'none' ? 0 : it.exit.duration] as [number, number],
   })));
   const privacyLayout = blockLayout(project.privacy.map((p) => ({
     ...p, label: p.effect.kind === 'solid' ? t("Opaco") : p.effect.kind === 'frosted' ? t("Vidrio esmerilado") : p.effect.kind === 'blur' ? t("Desenfoque") : t("Pixelado"),
@@ -468,6 +484,7 @@ export function Timeline({ store, player }: { store: EditorStore; player: Player
   );
 
   const ZL = 34;
+  const TL = 28;
   const ML = 30;
   const CL = 30;
   const PL = 26;
@@ -492,6 +509,8 @@ export function Timeline({ store, player }: { store: EditorStore; player: Player
               {markers.map((m, i) => <span key={i} className="tl-marker" style={{ left: x(m) }} title={t("Marca")}><Icon name="marker" size={11} /></span>)}
             </div>
           </div>
+          {row(t("Texto"), 'text', 'tr-text', TL * textLayout.count, itemBlocks('text', textLayout, TL),
+            { lane: 'text', hint: textLayout.flat.length === 0 ? t("Arrastra aquí para añadir un texto") : null })}
           {row(t("Zoom"), 'zoom', 'tr-zoom', ZL * zoomLayout.count, itemBlocks('zoom', zoomLayout, ZL),
             { lane: 'zoom', hint: zoomLayout.flat.length === 0 ? t("Arrastra aquí para añadir un zoom") : null })}
           {row(t("Lupa"), 'magnifier', 'tr-magnifier', ML * magnifierLayout.count, itemBlocks('magnifier', magnifierLayout, ML),
@@ -522,7 +541,7 @@ export function Timeline({ store, player }: { store: EditorStore; player: Player
           {addLane && addHover !== null && !draft && (
             <div className={`tl-addline tl-addline-${addLane}`} style={{ left: LABEL_W + x(addHover) }}>
               <span className="tl-addline-label">
-                {addLane === 'zoom' ? t("+ Zoom") : addLane === 'camera' ? t("+ Movimiento de cámara") : addLane === 'magnifier' ? t("+ Lupa") : t("+ Área de privacidad")}
+                {addLane === 'zoom' ? t("+ Zoom") : addLane === 'camera' ? t("+ Movimiento de cámara") : addLane === 'magnifier' ? t("+ Lupa") : addLane === 'text' ? t("+ Texto") : t("+ Área de privacidad")}
               </span>
             </div>
           )}

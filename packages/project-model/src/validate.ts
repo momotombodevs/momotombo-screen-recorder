@@ -1,4 +1,5 @@
 import type { Transition } from "./easing";
+import { TEXT_LIMITS } from "./factory";
 import { sortedByStart, sortedByTime } from "./sorting";
 import type {
   Background,
@@ -13,10 +14,17 @@ import type {
   Recording,
   Sequence,
   Style,
+  TextItem,
   Variant,
   ZoomItem,
 } from "./types";
-import { MAX_AUDIO_GAIN } from "./types";
+import {
+  MAX_AUDIO_GAIN,
+  TEXT_ALIGNS,
+  TEXT_ANCHORS,
+  TEXT_ANIMATION_KINDS,
+  TEXT_WEIGHTS,
+} from "./types";
 
 export class ProjectFormatError extends Error {}
 
@@ -429,6 +437,70 @@ function magnifierItem(v: unknown, path: string): MagnifierItem {
   return o as unknown as MagnifierItem;
 }
 
+const hex: Check = (v, p) => {
+  if (typeof v !== "string" || !/^#[0-9a-fA-F]{6}$/.test(v))
+    fail(p, "debe ser un color #rrggbb");
+};
+const within =
+  (r: { min: number; max: number }): Check =>
+  (x, q) =>
+    num(x, q, r);
+const textAnimation: Check = (v, p) =>
+  fields(
+    {
+      kind: (x, q) => oneOf(x, q, TEXT_ANIMATION_KINDS),
+      duration: within(TEXT_LIMITS.animation),
+    },
+    v,
+    p,
+  );
+
+function textItem(v: unknown, path: string): TextItem {
+  const o = itemBase(v, path, "text");
+  const L = TEXT_LIMITS;
+  const text = str(o.text, `${path}.text`);
+  if (text.trim() === "") fail(`${path}.text`, "está vacío");
+  if (text.length > L.length)
+    fail(`${path}.text`, `más de ${L.length} caracteres`);
+  fields(
+    {
+      position: (x, q) =>
+        fields({ x: within({ min: 0, max: 1 }), y: within({ min: 0, max: 1 }) }, x, q),
+      anchor: (x, q) => oneOf(x, q, TEXT_ANCHORS),
+      align: (x, q) => oneOf(x, q, TEXT_ALIGNS),
+      fontSize: within(L.fontSize),
+      fontWeight: (x, q) => {
+        if (!TEXT_WEIGHTS.includes(x as never))
+          fail(q, `debe ser ${TEXT_WEIGHTS.join(" | ")}`);
+      },
+      color: hex,
+      maxWidth: within(L.maxWidth),
+      enter: textAnimation,
+      exit: textAnimation,
+    },
+    o,
+    path,
+  );
+  optional(o, "background", path, (x, q) =>
+    fields(
+      { color: hex, opacity: within({ min: 0, max: 1 }), padding: within(L.padding), radius: within(L.radius) },
+      x,
+      q,
+    ),
+  );
+  optional(o, "stroke", path, (x, q) =>
+    fields({ color: hex, width: within(L.stroke) }, x, q),
+  );
+  optional(o, "shadow", path, (x, q) =>
+    fields(
+      { color: hex, opacity: within({ min: 0, max: 1 }), blur: within(L.blur), offsetY: within(L.offsetY) },
+      x,
+      q,
+    ),
+  );
+  return o as unknown as TextItem;
+}
+
 function items<T extends { start: number }>(
   v: unknown,
   key: string,
@@ -448,6 +520,7 @@ export const validateCameraLayouts = (v: unknown) =>
 export const validatePrivacy = (v: unknown) => items(v, "privacy", privacyItem);
 export const validateMagnifiers = (v: unknown) =>
   items(v, "magnifiers", magnifierItem);
+export const validateTexts = (v: unknown) => items(v, "texts", textItem);
 
 const MAX_OUTPUT_SIDE = 16384;
 

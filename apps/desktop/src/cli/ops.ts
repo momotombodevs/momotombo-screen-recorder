@@ -4,9 +4,10 @@ import {
   newCameraMoveLayout, pictureAspect, placeItem, privacyBounds, presetTransition, removeCameraLayout, removeMagnifier, removePrivacy,
   removeSegment, removeTimelineRange, removeZoom, renameProject, resolveCamera, sequenceDuration, setActiveVariant, setAudio,
   setCameraMovePosition, setStyle, setZoomSensitivity, sourceToTimeline, splitAt, trimSegment, updateCameraLayout,
-  updateMagnifier, updatePrivacy, updateVariant, updateZoom,
+  updateMagnifier, updatePrivacy, updateTextLook, updateVariant, updateZoom, removeText,
+  TEXT_ALIGNS, TEXT_ANCHORS, TEXT_ANIMATION_KINDS, TEXT_LIMITS, TEXT_PRESETS, TEXT_PRESET_IDS, TEXT_WEIGHTS,
   type AudioMix, type Background, type CameraLayout, type CameraShape, type CursorTrack, type DeepPartial, type ItemBase, type PlaceResult,
-  type Project, type Rect, type Style, type TrackItem, type TrackKey, type Variant, type Vec2,
+  type Project, type Rect, type Style, type TextAnimation, type TextItem, type TextLookPatch, type TrackItem, type TrackKey, type Variant, type Vec2,
 } from '@momotombo/project-model';
 import { secondsToTicks, ticksToSeconds, type Ticks } from '@momotombo/timing';
 import { ENGINE_VERSION, suggestZooms, whyNoSuggestions } from '@momotombo/zoom-engine';
@@ -18,7 +19,7 @@ const Unit = z.number().min(0).max(1);
 const Id = z.string().min(1).max(200);
 const Patch = z.record(z.string(), z.unknown());
 const Point = z.strictObject({ x: Unit, y: Unit });
-const Track = z.enum(['zooms', 'privacy', 'magnifiers', 'cameraLayouts']);
+const Track = z.enum(['zooms', 'privacy', 'magnifiers', 'cameraLayouts', 'texts']);
 const CAMERA_SHAPES = ['circle', 'square', 'rounded', 'rect', 'free', 'squircle'] as const satisfies readonly CameraShape[];
 const CameraSpot = z.strictObject({ position: Point.optional(), size: z.number().positive().max(1).optional() });
 const range = { start: Seconds, end: Seconds };
@@ -29,6 +30,30 @@ const PrivacyEffect = z.discriminatedUnion('kind', [
   z.strictObject({ kind: z.literal('blur'), strength: z.number() }),
   z.strictObject({ kind: z.literal('pixelate'), block: z.number() }),
 ]);
+
+const between = (r: { min: number; max: number }) => z.number().min(r.min).max(r.max);
+const Hex = z.string().regex(/^#[0-9a-fA-F]{6}$/, 'must be a #rrggbb color');
+const TL = TEXT_LIMITS;
+const TextAnim = z.strictObject({ kind: z.enum(TEXT_ANIMATION_KINDS), duration: z.number().min(0).max(ticksToSeconds(TL.animation.max)) });
+const TextBackground = z.strictObject({ color: Hex, opacity: Unit, padding: between(TL.padding), radius: between(TL.radius) });
+const TextStroke = z.strictObject({ color: Hex, width: between(TL.stroke) });
+const TextShadow = z.strictObject({ color: Hex, opacity: Unit, blur: between(TL.blur), offsetY: between(TL.offsetY) });
+const TextBody = z.string().max(TL.length).refine((s) => s.trim() !== '', 'must not be empty');
+const TextWeight = z.number().refine((w) => (TEXT_WEIGHTS as readonly number[]).includes(w), `must be ${TEXT_WEIGHTS.join(' | ')}`);
+const TEXT_LOOK = {
+  position: Point, anchor: z.enum(TEXT_ANCHORS), align: z.enum(TEXT_ALIGNS), fontSize: between(TL.fontSize), fontWeight: TextWeight,
+  color: Hex, maxWidth: between(TL.maxWidth),
+};
+const TextPatch = z.strictObject({
+  text: TextBody.optional(),
+  ...Object.fromEntries(Object.entries(TEXT_LOOK).map(([k, v]) => [k, v.optional()])) as { [K in keyof typeof TEXT_LOOK]: z.ZodOptional<(typeof TEXT_LOOK)[K]> },
+  position: Point.partial().optional(),
+  background: TextBackground.partial().nullable().optional(),
+  stroke: TextStroke.partial().nullable().optional(),
+  shadow: TextShadow.partial().nullable().optional(),
+  enter: TextAnim.partial().optional(),
+  exit: TextAnim.partial().optional(),
+});
 
 const CORNERS = {
   'top-left': [-1, -1], 'top-right': [1, -1], 'bottom-left': [-1, 1], 'bottom-right': [1, 1], left: [-1, 0], right: [1, 0],
@@ -51,6 +76,12 @@ export const Op = z.discriminatedUnion('op', [
     region: z.strictObject({ x: Unit, y: Unit, w: Unit, h: Unit }), effect: PrivacyEffect.optional(),
   }),
   z.strictObject({ op: z.literal('addMagnifier'), ...range, size: z.number().optional(), zoom: z.number().optional() }),
+  z.strictObject({
+    op: z.literal('addText'), ...range, text: TextBody, preset: z.enum(TEXT_PRESET_IDS).optional(),
+    ...Object.fromEntries(Object.entries(TEXT_LOOK).map(([k, v]) => [k, v.optional()])) as { [K in keyof typeof TEXT_LOOK]: z.ZodOptional<(typeof TEXT_LOOK)[K]> },
+    background: TextBackground.nullable().optional(), stroke: TextStroke.nullable().optional(), shadow: TextShadow.nullable().optional(),
+    enter: TextAnim.optional(), exit: TextAnim.optional(),
+  }),
   z.strictObject({ op: z.literal('addCameraLayout'), ...range, layout: Patch.optional(), enter: z.enum(['smooth', 'fast']).optional() }),
   z.strictObject({ op: z.literal('addCameraMove'), at: Seconds, duration: Duration.optional(), first: CameraSpot.optional(), second: CameraSpot.optional() }),
   z.strictObject({ op: z.literal('updateItem'), track: Track, id: Id, patch: Patch.optional(), start: Seconds.optional(), end: Seconds.optional() }),
@@ -123,7 +154,7 @@ function strictPatch<T>(patch: Obj, references: unknown[], path: string, locked:
 }
 
 const ITEM_LOCKED = ['id', 'type', 'recordingId', 'origin', 'start', 'end'] as const;
-const REMOVE_ITEM = { zooms: removeZoom, privacy: removePrivacy, magnifiers: removeMagnifier, cameraLayouts: removeCameraLayout };
+const REMOVE_ITEM = { zooms: removeZoom, privacy: removePrivacy, magnifiers: removeMagnifier, cameraLayouts: removeCameraLayout, texts: removeText };
 
 function itemReferences(item: TrackItem): unknown[] {
   if (item.type === 'privacy') return [item, ...PRIVACY_EFFECT_SHAPES.map((effect) => ({ effect }))];
@@ -133,9 +164,30 @@ function itemReferences(item: TrackItem): unknown[] {
 
 const findItem = (p: Project, track: TrackKey, id: string) => (p[track] as TrackItem[]).find((i) => i.id === id);
 
+const toTicks = (a: { kind?: TextAnimation['kind']; duration?: number } | undefined) =>
+  a && { ...a, ...(a.duration !== undefined ? { duration: secondsToTicks(a.duration) } : {}) };
+
+const OPTIONAL_LOOK = { background: TextBackground, stroke: TextStroke, shadow: TextShadow } as const;
+
+function patchText(p: Project, item: TextItem, raw: Obj): Project {
+  const locked = ITEM_LOCKED.filter((k) => Object.hasOwn(raw, k));
+  if (locked.length) throw new OpError(`${locked.map((k) => `texts.${k}`).join(', ')} cannot be changed with a patch`);
+  const parsed = TextPatch.safeParse(raw);
+  if (!parsed.success) throw new OpError(parsed.error.issues.map((i) => `texts.${i.path.join('.')}: ${i.message}`).join('; '));
+  const { enter, exit, ...look } = parsed.data;
+  const next = updateTextLook(p, item.id, { ...look, enter: toTicks(enter), exit: toTicks(exit) } as TextLookPatch);
+  const patched = findItem(next, 'texts', item.id) as TextItem;
+  for (const key of Object.keys(OPTIONAL_LOOK) as (keyof typeof OPTIONAL_LOOK)[]) {
+    if (patched[key] && !OPTIONAL_LOOK[key].safeParse(patched[key]).success)
+      throw new OpError(`texts.${key} is not set on this text yet; give all of ${Object.keys(OPTIONAL_LOOK[key].shape).join(', ')}`);
+  }
+  return next;
+}
+
 function patchItem(p: Project, track: TrackKey, item: TrackItem, patch: Obj): Project {
   const timed = ['start', 'end'].filter((k) => Object.hasOwn(patch, k));
   if (timed.length) throw new OpError(`${timed.map((k) => `${track}.${k}`).join(', ')} cannot be changed with a patch; retime it with the op's start and end (timeline seconds)`);
+  if (item.type === 'text') return patchText(p, item, patch);
   const clean = strictPatch<TrackItem>(patch, itemReferences(item), track, ITEM_LOCKED);
   const next = track === 'zooms' ? updateZoom(p, item.id, clean as never)
     : track === 'privacy' ? updatePrivacy(p, item.id, clean as never)
@@ -319,6 +371,15 @@ function applyOp(p: Project, op: Op, ctx: OpContext): Step {
       const m = p.style.magnifier;
       return placed(placeItem(p, 'magnifiers', { ...freeRange(p, 'magnifiers', op), size: op.size ?? m.size, zoom: op.zoom ?? m.zoom }), 'magnifiers', op);
     }
+    case 'addText': {
+      const { op: _op, start, end, preset, text, background, stroke, shadow, enter, exit, ...look } = op;
+      const base = TEXT_PRESETS[preset ?? 'title'];
+      const step = placed(placeItem(p, 'texts', {
+        ...freeRange(p, 'texts', op), ...base, ...look, text, fontWeight: (look.fontWeight ?? base.fontWeight) as TextItem['fontWeight'],
+        ...(enter ? { enter: toTicks(enter) as TextAnimation } : {}), ...(exit ? { exit: toTicks(exit) as TextAnimation } : {}),
+      }), 'texts', { start, end });
+      return { ...step, project: updateTextLook(step.project, step.added!.id, { background, stroke, shadow }) };
+    }
     case 'addCameraLayout': {
       const base = newCameraMoveLayout(p);
       const look = op.layout ? strictPatch<CameraLayout>(op.layout, [base, p.style.camera], 'layout') : {};
@@ -452,6 +513,10 @@ export function describeProject(project: Project) {
     zooms: project.zooms.map((z) => ({ id: z.id, shown: shown(z), origin: z.origin, mode: z.mode, scale: z.scale, center: z.center })),
     privacy: project.privacy.map((a) => ({ id: a.id, shown: shown(a), region: a.region, effect: a.effect })),
     magnifiers: project.magnifiers.map((m) => ({ id: m.id, shown: shown(m), size: m.size, zoom: m.zoom })),
+    texts: project.texts.map((item) => {
+      const { id, type: _type, recordingId: _rec, start: _start, end: _end, enter, exit, ...look } = item;
+      return { id, shown: shown(item), ...look, enter: { ...enter, duration: seconds(enter.duration) }, exit: { ...exit, duration: seconds(exit.duration) } };
+    }),
     cameraLayouts: project.cameraLayouts.map((c) => ({
       id: c.id, shown: shown(c), origin: c.origin, layout: c.layout,
       enterSeconds: seconds(c.enter.duration), ...(c.second ? { second: c.second } : {}), ...(c.split !== undefined ? { split: c.split } : {}),
