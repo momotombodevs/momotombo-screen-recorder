@@ -42,6 +42,9 @@ import {
   writtenFormat,
   type ExportRoute,
 } from "./route";
+import { SAMPLE_RATE, mixTimelineAudio } from "./audio-mix";
+
+export { AudioReadError, mixTimelineAudio } from "./audio-mix";
 
 export type { ExportFormat };
 
@@ -81,7 +84,6 @@ export interface ExportProgress {
   fallback?: string;
 }
 
-const SAMPLE_RATE = 48_000;
 
 /** The file name an export suggests, without extension: project and format ("Demo 16x9"). */
 export function exportBaseName(project: Project, variantId: ID): string {
@@ -410,112 +412,6 @@ function bufferedSink(exportId: string): {
       await chain;
     },
   };
-}
-
-// ─── Audio ────────────────────────────────────────────────────────────────────
-
-/** An audio source the export needs could not be read; the export stops instead of leaving it out. */
-export class AudioReadError extends Error {
-  override name = "AudioReadError";
-}
-
-async function decodeSource(
-  file: string,
-  url: string,
-  ctx: BaseAudioContext,
-): Promise<AudioBuffer> {
-  try {
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return await ctx.decodeAudioData(await res.arrayBuffer());
-  } catch {
-    const name = file.split("/").pop() ?? file;
-    throw new AudioReadError(
-      t(
-        "No se pudo leer el audio de origen: {file}. Puede que el archivo esté dañado o falte. Puedes desactivar el audio e intentarlo de nuevo.",
-        { file: name },
-      ),
-    );
-  }
-}
-
-const AUDIO_KINDS = ["mic", "system"] as const satisfies readonly SourceKind[];
-
-/**
- * Mixes mic + system audio along the edited timeline into stereo 48 kHz PCM. Null when nothing on
- * the timeline has audible sound. A source that would be heard but cannot be decoded throws
- * AudioReadError: an export with audio never silently drops a track.
- */
-export async function mixTimelineAudio(
-  project: Project,
-  mediaBase: string,
-  signal?: AbortSignal,
-): Promise<[Float32Array, Float32Array] | null> {
-  const duration = sequenceDuration(project);
-  const length = Math.ceil((duration / TICKS_PER_SECOND) * SAMPLE_RATE);
-  if (length === 0) return null;
-  const ctx = new OfflineAudioContext(2, 1, SAMPLE_RATE);
-  const decoded = new Map<string, AudioBuffer>();
-  const url = (file: string) =>
-    mediaBase + file.split("/").map(encodeURIComponent).join("/");
-  const audible = (k: (typeof AUDIO_KINDS)[number]) =>
-    !project.audio[k].muted && project.audio[k].gain > 0;
-  const placements = layoutSegments(project);
-  const used = new Set(placements.map((pl) => pl.segment.recordingId));
-  for (const rec of Object.values(project.recordings)) {
-    if (!used.has(rec.id)) continue;
-    for (const k of AUDIO_KINDS) {
-      const src = rec.sources[k];
-      if (src && audible(k))
-        decoded.set(
-          `${rec.id}/${k}`,
-          await decodeSource(src.file, url(src.file), ctx),
-        );
-      if (signal?.aborted) return null;
-    }
-  }
-  if (decoded.size === 0) return null;
-  const L = new Float32Array(length);
-  const R = new Float32Array(length);
-  for (const pl of placements) {
-    const rec: Recording | undefined =
-      project.recordings[pl.segment.recordingId];
-    if (!rec) continue;
-    for (const k of AUDIO_KINDS) {
-      const mix = project.audio[k];
-      const buf = decoded.get(`${rec.id}/${k}`);
-      const src = rec.sources[k];
-      if (!buf || !src) continue;
-      const offset = src.startOffset + (rec.syncOffsets[k] ?? 0);
-      const outStart = Math.round(
-        (pl.timelineStart / TICKS_PER_SECOND) * SAMPLE_RATE,
-      );
-      const count = Math.round(
-        ((pl.timelineEnd - pl.timelineStart) / TICKS_PER_SECOND) * SAMPLE_RATE,
-      );
-      const inStart = Math.round(
-        ((pl.segment.sourceStart - offset) / TICKS_PER_SECOND) * buf.sampleRate,
-      );
-      const c0 = buf.getChannelData(0);
-      const c1 = buf.numberOfChannels > 1 ? buf.getChannelData(1) : c0;
-      const ratio = buf.sampleRate / SAMPLE_RATE;
-      for (let i = 0; i < count; i++) {
-        const j = Math.floor(inStart + i * ratio);
-        if (j < 0 || j >= c0.length) continue;
-        const o = outStart + i;
-        if (o >= length) break;
-        L[o]! += c0[j]! * mix.gain;
-        R[o]! += c1[j]! * mix.gain;
-      }
-    }
-  }
-  // Soft limiter so summed sources never clip harshly.
-  for (const ch of [L, R])
-    for (let i = 0; i < ch.length; i++) {
-      const v = ch[i]!;
-      ch[i] = v > 1 || v < -1 ? Math.tanh(v) : v;
-    }
-  return [L, R];
 }
 
 // ─── Frame sources ────────────────────────────────────────────────────────────
