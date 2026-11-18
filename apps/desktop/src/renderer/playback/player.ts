@@ -2,6 +2,7 @@ import { layoutSegments, sequenceDuration, timelineToSource, type ID, type Proje
 import { TICKS_PER_SECOND, type Ticks } from '@momotombo/timing';
 import type { EditorStore } from '../state/editor-store';
 import { probe } from '../perf-probe';
+import { PreviewAudio } from '../audio/preview-audio';
 
 export interface RecordingMedia {
   screen?: HTMLVideoElement;
@@ -85,6 +86,7 @@ export class Player {
   private lastSeek = new WeakMap<HTMLMediaElement, number>();
   /** Timeline time shown on the last step. */
   private shown: Ticks = 0;
+  private readonly audio = new PreviewAudio();
 
   constructor(private readonly store: EditorStore) {
     this.sync(store.project);
@@ -115,6 +117,8 @@ export class Player {
     const base = this.store.getState().mediaBase;
     for (const [id, m] of this.media) {
       if (project.recordings[id]) continue;
+      if (m.mic) this.audio.release(m.mic);
+      if (m.system) this.audio.release(m.system);
       releaseMedia(m);
       this.media.delete(id);
     }
@@ -139,16 +143,17 @@ export class Player {
           // The playhead may have been set before the file's metadata arrived.
           el.addEventListener('loadedmetadata', () => { if (!this.store.getState().playing) this.positionPaused(this.store.getState().playhead); });
           m[kind] = el;
+          if (kind === 'mic' || kind === 'system') this.audio.attach(el, kind);
         }
       }
-      if (m.mic) {
-        m.mic.volume = Math.min(1, project.audio.mic.gain);
-        m.mic.muted = project.audio.mic.muted;
-      }
-      if (m.system) {
-        m.system.volume = Math.min(1, project.audio.system.gain);
-        m.system.muted = project.audio.system.muted;
-      }
+    }
+    this.audio.update(project.audio, this.soundElements());
+  }
+
+  private *soundElements(): Generator<[HTMLMediaElement, 'mic' | 'system']> {
+    for (const m of this.media.values()) {
+      if (m.mic) yield [m.mic, 'mic'];
+      if (m.system) yield [m.system, 'system'];
     }
   }
 
@@ -305,6 +310,7 @@ export class Player {
     const duration = sequenceDuration(s.project);
     if (duration <= 0 || s.playing) return;
     if (s.playhead >= duration - TICKS_PER_SECOND / 30) this.store.setPlayhead(0);
+    this.audio.resume();
     this.store.setPlaying(true);
     this.cue(this.store.getState().playhead, performance.now());
     this.shown = this.clockOrigin;
@@ -349,6 +355,7 @@ export class Player {
     this.unsub();
     for (const m of this.media.values()) releaseMedia(m);
     this.media.clear();
+    this.audio.dispose();
   }
 }
 
