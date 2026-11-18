@@ -16,6 +16,7 @@ import type {
   Variant,
   ZoomItem,
 } from "./types";
+import { MAX_AUDIO_GAIN } from "./types";
 
 export class ProjectFormatError extends Error {}
 
@@ -468,8 +469,22 @@ export function validateVariants(v: unknown): asserts v is Variant[] {
   });
 }
 
+const range = (min: number, max: number): Check => (x, q) => num(x, q, { min, max });
+
 const channel: Check = (v, p) =>
-  fields({ gain: (x, q) => num(x, q, { min: 0 }), muted: bool }, v, p);
+  fields(
+    {
+      gain: (x, q) => num(x, q, { min: 0, max: MAX_AUDIO_GAIN }),
+      muted: bool,
+      highpassHz: (x, q) => num(x, q, { min: 0, max: 1000 }),
+      compressor: (x, q) =>
+        fields({ enabled: bool, thresholdDb: range(-60, 0), ratio: range(1, 20) }, x, q),
+      gate: (x, q) => fields({ enabled: bool, thresholdDb: range(-100, 0) }, x, q),
+      normalize: (x, q) => fields({ enabled: bool, targetLufs: range(-40, -5) }, x, q),
+    },
+    v,
+    p,
+  );
 
 export function validateAudio(v: unknown): asserts v is Project["audio"] {
   fields({ mic: channel, system: channel }, v, "audio");
