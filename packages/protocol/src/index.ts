@@ -284,8 +284,7 @@ export interface CliExportJob {
     quality?: 'standard' | 'high';
     includeAudio?: boolean;
   };
-  /** Null: main's default export folder, as in the export window. */
-  target: ExportTarget | null;
+  target: ExportTarget;
 }
 
 export const CliExportReport = z.object({

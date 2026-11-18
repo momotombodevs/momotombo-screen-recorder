@@ -14,7 +14,7 @@ interface Shown { name: string; progress: ExportProgress; final: CliExportReport
 
 export function CliExportStatus({ editingProjectId }: { editingProjectId: RefObject<string | null> }) {
   const [shown, setShown] = useState<Shown | null>(null);
-  const abort = useRef<AbortController | null>(null);
+  const abort = useRef<{ requestId: string; controller: AbortController } | null>(null);
 
   useEffect(() => {
     let hideTimer: ReturnType<typeof setTimeout> | undefined;
@@ -31,7 +31,7 @@ export function CliExportStatus({ editingProjectId }: { editingProjectId: RefObj
       }
       clearTimeout(hideTimer);
       const controller = new AbortController();
-      abort.current = controller;
+      abort.current = { requestId: job.requestId, controller };
       const name = String((job.opened.json as { name?: unknown }).name ?? '');
       setShown({ name, progress: { phase: 'preparing', frame: 0, total: 0, rate: 0, etaSeconds: 0 }, final: null });
       let lastUi = 0;
@@ -54,7 +54,8 @@ export function CliExportStatus({ editingProjectId }: { editingProjectId: RefObj
     };
     void take();
     const off = api.onCliExportRequest(() => void take());
-    return () => { off(); clearTimeout(hideTimer); abort.current?.abort(); };
+    const offCancel = api.onCliExportCancel((requestId) => { if (abort.current?.requestId === requestId) abort.current.controller.abort(); });
+    return () => { off(); offCancel(); clearTimeout(hideTimer); abort.current?.controller.abort(); };
   }, [editingProjectId]);
 
   if (!shown) return null;
@@ -78,7 +79,7 @@ export function CliExportStatus({ editingProjectId }: { editingProjectId: RefObj
             <span className="muted small mono">
               {progress.phase === 'audio' ? t("Preparando el audio…") : progress.phase === 'finishing' ? t("Terminando el archivo…") : t("{frame}/{total} fotogramas · {rate} fps · faltan {eta}", { frame: progress.frame, total: progress.total, rate: progress.rate.toFixed(1), eta: durationText(progress.etaSeconds) })}
             </span>
-            <Button size="sm" variant="secondary" onClick={() => abort.current?.abort()}>{t("Cancelar")}</Button>
+            <Button size="sm" variant="secondary" onClick={() => abort.current?.controller.abort()}>{t("Cancelar")}</Button>
           </div>
         </>
       )}

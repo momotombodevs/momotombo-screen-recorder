@@ -1,4 +1,4 @@
-import { basename, extname, isAbsolute, relative, sep } from 'node:path';
+import { basename, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { z } from 'zod';
 import { ProjectId } from '@momotombo/protocol';
 
@@ -6,6 +6,8 @@ export const EXPORT_REQUEST_FLAG = '--export-request=';
 export const MAX_REQUEST_BYTES = 16_384;
 export const projectExportStatusPath = (requestId: string): string => `cache/export-status-${requestId}.json`;
 export const projectExportRequestPath = (requestId: string): string => `cache/export-request-${requestId}.json`;
+export const projectExportCancelPath = (requestId: string): string => `cache/export-cancel-${requestId}`;
+const EXPORT_FILE = /^export-(?:status|request|cancel)-(xr_[0-9a-f]{16})(?:\.json)?$/;
 
 export const ExportRequest = z.object({
   requestId: z.string().regex(/^xr_[0-9a-f]{16}$/),
@@ -113,4 +115,21 @@ export function nextStatus(prev: ExportStatus, report: ExportReport, now: Date):
   if (TERMINAL_STATES.includes(prev.state)) return null;
   const done = TERMINAL_STATES.includes(report.state);
   return { ...prev, ...report, progress: report.state === 'done' ? 1 : report.progress, finishedAt: done ? now.toISOString() : null };
+}
+
+export function requestFileLocation(path: string, projectsRoot: string): { projectDir: string; requestId: string } | null {
+  const parts = relative(resolve(projectsRoot), resolve(path)).split(sep);
+  if (parts.length !== 3 || parts[0] === '..' || parts[0] === '' || parts[1] !== 'cache') return null;
+  const match = /^export-request-(xr_[0-9a-f]{16})\.json$/.exec(parts[2]!);
+  return match ? { projectDir: join(resolve(projectsRoot), parts[0]!), requestId: match[1]! } : null;
+}
+
+export function staleExportFiles(entries: readonly { name: string; mtimeMs: number }[], keep: number, current: string): string[] {
+  const newest = new Map<string, number>();
+  for (const e of entries) {
+    const id = EXPORT_FILE.exec(e.name)?.[1];
+    if (id) newest.set(id, Math.max(newest.get(id) ?? 0, e.mtimeMs));
+  }
+  const kept = new Set([current, ...[...newest].filter(([id]) => id !== current).sort((a, b) => b[1] - a[1]).slice(0, keep).map(([id]) => id)]);
+  return entries.filter((e) => { const id = EXPORT_FILE.exec(e.name)?.[1]; return id !== undefined && !kept.has(id); }).map((e) => e.name);
 }

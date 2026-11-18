@@ -1,7 +1,7 @@
 import type { CliExportJob, CliExportReport } from '@momotombo/protocol';
 import { api } from '../api';
 import { EditorStore } from '../state/editor-store';
-import { checkExportSupport, exportBaseName, runExport, type ExportProgress } from './exporter';
+import { checkExportSupport, runExport, type ExportProgress } from './exporter';
 import { cliExportChoices, cliReport, exportOptions } from './options';
 
 const REPORT_INTERVAL_MS = 500;
@@ -20,7 +20,6 @@ export async function runCliExport(job: CliExportJob, onProgress: (p: ExportProg
   if (!support.ok) return failed(support.message);
   if (support.written !== choices.format)
     return failed(`This computer cannot write ${choices.format}; it would write ${support.written}. Ask for --format ${support.written}.`);
-  const target = job.target ?? await api.exportDefaultTarget(project.id, exportBaseName(project, choices.variantId), support.written);
   let lastSent = 0;
   let lastPhase = '';
   const report = (p: ExportProgress) => {
@@ -32,6 +31,6 @@ export async function runCliExport(job: CliExportJob, onProgress: (p: ExportProg
     const r = cliReport(job.requestId, p);
     if (r.state === 'running') void api.reportCliExport(r).catch(() => undefined);
   };
-  const result = await runExport(project, cursors, mediaBase, exportOptions(choices, target, support), report, signal);
+  const result = await runExport(project, cursors, mediaBase, exportOptions(choices, job.target, support), report, signal);
   return cliReport(job.requestId, result);
 }

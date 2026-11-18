@@ -3,7 +3,7 @@ import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { lstat, mkdir, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, extname, join, resolve } from "node:path";
+import { basename, dirname, extname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import {
   ProjectFormatError,
@@ -21,6 +21,7 @@ import {
   ExportRequest,
   TERMINAL_STATES,
   outPathProblem,
+  projectExportCancelPath,
   projectExportStatusPath,
   projectExportRequestPath,
   statusForRequest,
@@ -51,16 +52,18 @@ const USAGE = `momotombo-edit: edit Momotombo projects from the command line.
 Options: --root <projects folder>   --dry-run (apply: validate and report, write nothing)
 export:  --variant <id|name>  --format mp4|webm  --resolution 1080|2160  --fps 30|60  --quality standard|high
          --no-audio  --out <new file, absolute or relative to here>  --timeout <seconds, default ${DEFAULT_EXPORT_TIMEOUT_SECONDS}>
-Exit codes: 0 done, 1 usage or other error, 3 invalid ops, project or export options, 4 the project changed while applying
-            (nothing written), 5 analyze needs ffmpeg and ffprobe on PATH, 6 the app refused the export (busy),
-            7 the export failed, 8 no result before --timeout (the export may still be running)`;
+Exit codes: 0 done, 1 usage or other error (incl. the app not starting or not answering within 45 s), 3 invalid ops,
+            project or export options (also when the app rejects them), 4 the project changed while applying (nothing written),
+            5 analyze needs ffmpeg and ffprobe on PATH, 6 the app is busy (recording, exporting, another project in the editor),
+            7 the export failed, 8 no result before --timeout (the export is cancelled), 130 interrupted (the export is cancelled)`;
 
-export const EXIT = { ok: 0, usage: 1, invalid: 3, conflict: 4, toolsMissing: 5, refused: 6, failed: 7, timeout: 8 } as const;
+export const EXIT = { ok: 0, usage: 1, invalid: 3, conflict: 4, toolsMissing: 5, refused: 6, failed: 7, timeout: 8, interrupted: 130 } as const;
 
 class UsageError extends Error {}
 class ExportRefusedError extends Error {}
 class ExportFailedError extends Error {}
 class ExportTimeoutError extends Error {}
+class ExportInterruptedError extends Error {}
 
 interface Found {
   dir: string;
@@ -82,6 +85,9 @@ export interface Io {
   env: NodeJS.ProcessEnv;
   launchApp?: (flag: string, env: NodeJS.ProcessEnv) => Promise<string>;
   pollMs?: number;
+  takeDeadlineMs?: number;
+  cancelWaitMs?: number;
+  interrupt?: AbortSignal;
   run?: Run;
 }
 
@@ -320,40 +326,90 @@ async function probeMedia(file: string, run: Run): Promise<MediaSummary | null> 
 
 const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+const TAKE_DEADLINE_MS = 45_000;
+const CANCEL_WAIT_MS = 15_000;
+
+async function waitForInterrupt<T>(io: Io, task: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  if (io.interrupt) return task(io.interrupt);
+  const controller = new AbortController();
+  const onSignal = () => controller.abort();
+  process.once("SIGINT", onSignal);
+  process.once("SIGTERM", onSignal);
+  try {
+    return await task(controller.signal);
+  } finally {
+    process.removeListener("SIGINT", onSignal);
+    process.removeListener("SIGTERM", onSignal);
+  }
+}
+
 async function exportInApp(chosen: Found, request: ExportRequest, root: string, timeoutSeconds: number, io: Io): Promise<unknown> {
   if (request.out) await checkOut(request.out, request.format, root);
-  const requestFile = join(chosen.dir, projectExportRequestPath(request.requestId));
-  const statusFile = join(chosen.dir, projectExportStatusPath(request.requestId));
+  const { requestId } = request;
+  const requestFile = join(chosen.dir, projectExportRequestPath(requestId));
+  const statusFile = join(chosen.dir, projectExportStatusPath(requestId));
+  const cancelFile = join(chosen.dir, projectExportCancelPath(requestId));
+  const readStatus = async () => statusForRequest(await readFile(statusFile, "utf8").catch(() => null), requestId);
+  const finished = (s: ExportStatus | null): s is ExportStatus => !!s && TERMINAL_STATES.includes(s.state);
+  const pollMs = io.pollMs ?? 500;
   const started = Date.now();
   await mkdir(dirname(requestFile), { recursive: true });
   await writeFile(requestFile, JSON.stringify(request));
   let status: ExportStatus | null = null;
+  let stopped: "timeout" | "interrupt" | null = null;
+  let progressAtStop: ExportStatus | null = null;
   try {
     const app = await (io.launchApp ?? ((flag, env) => launchApp(flag, env, true)))(`${EXPORT_REQUEST_FLAG}${requestFile}`, io.env);
-    const deadline = started + timeoutSeconds * 1000;
-    while (!status || !TERMINAL_STATES.includes(status.state)) {
-      if (Date.now() > deadline)
-        throw new ExportTimeoutError(
-          status
-            ? `No result after ${timeoutSeconds} s; the export is ${status.state} at ${Math.round(status.progress * 100)}% (${statusFile}).`
-            : `${app} did not take the export request within ${timeoutSeconds} s.`,
-        );
-      await pause(io.pollMs ?? 500);
-      status = statusForRequest(await readFile(statusFile, "utf8").catch(() => null), request.requestId) ?? status;
+    await waitForInterrupt(io, async (interrupt) => {
+      const takeBy = started + Math.min(io.takeDeadlineMs ?? TAKE_DEADLINE_MS, timeoutSeconds * 1000);
+      const deadline = started + timeoutSeconds * 1000;
+      while (!finished(status)) {
+        if (interrupt.aborted) { stopped = "interrupt"; break; }
+        if (!status && Date.now() > takeBy)
+          throw new Error(`${app} did not acknowledge the export request within ${Math.round((takeBy - started) / 1000)} s; check that Momotombo starts (MOMOTOMBO_APP, pnpm start).`);
+        if (Date.now() > deadline) { stopped = "timeout"; break; }
+        await pause(pollMs);
+        status = (await readStatus()) ?? status;
+      }
+    });
+    if (stopped) {
+      progressAtStop = status;
+      await writeFile(cancelFile, "");
+      const cancelBy = Date.now() + (io.cancelWaitMs ?? CANCEL_WAIT_MS);
+      while (!finished(status) && Date.now() < cancelBy) {
+        await pause(pollMs);
+        status = (await readStatus()) ?? status;
+      }
     }
   } finally {
     await rm(requestFile, { force: true });
   }
+  if (stopped && status?.state !== "done") {
+    const at = progressAtStop as ExportStatus | null;
+    const where = at ? `it was ${at.state} at ${Math.round(at.progress * 100)}%` : "it had not started";
+    if (finished(status)) await rm(statusFile, { force: true });
+    const outcome = finished(status) ? "the app cancelled it and removed the partial file" : `the app did not confirm the cancellation (${statusFile})`;
+    const message = stopped === "timeout" ? `No result after ${timeoutSeconds} s (${where}); ${outcome}.` : `Interrupted (${where}); ${outcome}.`;
+    throw stopped === "timeout" ? new ExportTimeoutError(message) : new ExportInterruptedError(message);
+  }
+  if (!finished(status)) throw new ExportFailedError(`The export ended without a result (${statusFile}).`);
   await rm(statusFile, { force: true });
-  if (status.state === "refused") throw new ExportRefusedError(`The app refused the export (${status.reason}): ${status.error}`);
+  if (status.state === "refused") {
+    const message = `The app refused the export (${status.reason}): ${status.error}`;
+    throw status.reason === "invalid-request" ? new OpError(message) : new ExportRefusedError(message);
+  }
   if (status.state === "failed") throw new ExportFailedError(`The export failed: ${status.error}`);
   const outFile = status.outFile!;
   const info = await stat(outFile).catch(() => null);
   if (!info?.isFile() || info.size !== status.bytes)
     throw new ExportFailedError(`The app reported ${outFile} done, but it is missing or incomplete.`);
+  if (request.out) {
+    const wanted = join(await realpath(dirname(request.out)), basename(request.out));
+    if ((await realpath(outFile)) !== wanted) throw new ExportFailedError(`The app wrote ${outFile} instead of ${request.out}.`);
+  }
   return {
     id: chosen.project.id,
-    requestId: request.requestId,
+    requestId,
     state: status.state,
     outFile,
     bytes: info.size,
@@ -469,6 +525,7 @@ function exitCode(e: unknown): number {
   if (e instanceof ExportRefusedError) return EXIT.refused;
   if (e instanceof ExportFailedError) return EXIT.failed;
   if (e instanceof ExportTimeoutError) return EXIT.timeout;
+  if (e instanceof ExportInterruptedError) return EXIT.interrupted;
   if (e instanceof WriteConflictError) return EXIT.conflict;
   if (e instanceof ToolsMissingError) return EXIT.toolsMissing;
   if (e instanceof OpError || e instanceof ProjectFormatError) return EXIT.invalid;

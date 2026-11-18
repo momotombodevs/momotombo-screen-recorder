@@ -12,8 +12,8 @@ import { CaptureWorker, IMPORT_VIDEO_TYPES, Schemas, type AppInfo, type Channel,
 import { newId, type Recording } from '@momotombo/project-model';
 import { APP_NAME, PROJECTS_FOLDER } from '../shared/brand';
 import { projectIdFromArgv } from '../shared/open-project';
-import { busyReason, exportRequestPathFromArgv, nextStatus, startStatus, type ExportStatus, type RefusalReason } from '../shared/export-request';
-import { completeFileProblem, loadExportRequest, writeStatus, writeStatusNow } from './cli-export';
+import { exportRequestPathFromArgv } from '../shared/export-request';
+import { CliExports } from './cli-export';
 import { migrateLegacyData } from './legacy-name';
 import { CaptureManager } from './capture/manager';
 import { runCodecProbe } from './codec-probe';
@@ -345,6 +345,7 @@ function registerIpc(): void {
     if (!target.path.toLowerCase().endsWith('.mp4')) throw new Error(tm("La ubicación para guardar ya no es válida. Vuelve a elegirla."));
     const r = await mfExports.begin(target.path, { overwrite: target.overwrite }, { width, height, fps, bitrate, audio });
     await watchExport(r.exportId, e.sender);
+    cli.noteBegin(token, r.exportId);
     return r;
   });
   handle('export:mfWrite', ({ exportId, kind, time, duration, data }) => mfExports.write(exportId, kind, time, duration, data));
@@ -352,6 +353,7 @@ function registerIpc(): void {
     const target = exportTargets.take(token);
     if (!target) throw new Error(tm("La ubicación para guardar ya no es válida. Vuelve a elegirla."));
     const r = await exportsWriter.begin(target.path, { overwrite: target.overwrite });
+    cli.noteBegin(token, r.exportId);
     const wc = e.sender;
     if (wc.isDestroyed()) {
       await exportsWriter.end(r.exportId, true);
@@ -370,104 +372,53 @@ function registerIpc(): void {
   handle('export:write', ({ exportId, position, data }) => exportsWriter.write(exportId, position, data));
   handle('export:end', async ({ exportId, cancel }) => {
     try {
-      return await endExport(exportId, cancel);
+      const result = await endExport(exportId, cancel);
+      cli.noteEnd(exportId, result);
+      return result;
     } finally {
       releaseExport(exportId);
     }
   });
   // Exports momotombo-edit asks for (shared/export-request.ts). The request file comes from any
   // local process, so it is validated here and the renderer only ever gets a one-time target token.
-  let cliJob: { job: CliExportJob; dir: string; status: ExportStatus; taken: boolean } | null = null;
-  let cliStatusWrite: Promise<void> = Promise.resolve();
-  const saveCliStatus = (dir: string, status: ExportStatus) => {
-    cliStatusWrite = cliStatusWrite.then(() => writeStatus(dir, status)).catch((e: unknown) => { process.stderr.write(`Could not write the export status: ${String(e)}\n`); });
-    return cliStatusWrite;
-  };
-  const refuseCli = (dir: string, requestId: string, reason: RefusalReason, error: string) =>
-    saveCliStatus(dir, startStatus(requestId, new Date(), { state: 'refused', reason, error }));
-  const finishCli = (state: 'failed' | 'done', patch: Partial<ExportStatus>) => {
-    const current = cliJob;
-    if (!current) return;
-    cliJob = null;
-    const next = nextStatus(current.status, { ...current.status, ...patch, state }, new Date());
-    const wc = mainWindow?.webContents;
-    if (wc && !wc.isDestroyed() && ![...exporting.values()].includes(wc)) wc.setBackgroundThrottling(!SMOKE);
-    if (next) void saveCliStatus(current.dir, next);
-  };
-  failCliJobNow = (error: string) => {
-    if (!cliJob) return;
-    const next = nextStatus(cliJob.status, { ...cliJob.status, state: 'failed', error }, new Date());
-    if (next) writeStatusNow(cliJob.dir, next);
-    cliJob = null;
-  };
-  const acceptExportRequest = async (path: string) => {
-    const loaded = await loadExportRequest(path, {
-      root: store.root,
-      dirOf: async (id) => (await store.entries()).find((e) => e.id === id)?.dir ?? null,
-    });
-    if (!loaded.ok) {
-      process.stderr.write(`Export request refused: ${loaded.error}\n`);
-      if (loaded.dir && loaded.requestId) await refuseCli(loaded.dir, loaded.requestId, 'invalid-request', loaded.error);
-      return;
-    }
-    const { request, dir, out } = loaded;
-    const busy = busyReason({ capturePhase: capture.state.phase, exportsRunning: exportsWriter.pending + mfExports.pending, jobActive: cliJob !== null });
-    if (busy) { await refuseCli(dir, request.requestId, busy.reason, busy.error); return; }
-    let json: unknown;
-    try {
-      json = await store.read(request.projectId);
-    } catch (e) {
-      await refuseCli(dir, request.requestId, 'invalid-request', `The project cannot be read: ${(e as Error).message}`);
-      return;
-    }
-    const { requestId, projectId, format, variantId, resolution, fps, quality, includeAudio } = request;
-    cliJob = {
-      dir, taken: false, status: startStatus(requestId, new Date()),
-      job: {
-        requestId, opened: { id: projectId, json, mediaBase: mediaBase(projectId), dir },
-        choices: { format, variantId, resolution, fps, quality, includeAudio },
-        target: out ? issueTarget(out, false, true) : null,
-      },
-    };
-    await saveCliStatus(dir, cliJob.status);
-    const win = mainWindow && !mainWindow.isDestroyed() ? mainWindow : openMainWindow(true);
-    win.webContents.setBackgroundThrottling(false);
-    if (!win.isVisible() && !win.isMinimized()) win.showInactive();
-    broadcast('export:cliRequest', null);
-  };
+  const isMainWindow = (e: IpcMainInvokeEvent) => e.sender === mainWindow?.webContents;
+  const cli = new CliExports({
+    root: store.root,
+    projectDirs: () => store.entries(),
+    readProject: (id) => store.read(id),
+    busy: () => ({ capturePhase: capture.state.phase, exportsRunning: exportsWriter.pending + mfExports.pending }),
+    issueTarget: (path) => issueTarget(path, false, true),
+    defaultTarget: async (projectId, baseName, extension) =>
+      issueTarget(await uniquePath(await defaultExportFolder(projectId), safeBaseName(baseName), extension), false, false),
+    mediaBase,
+    showJob: () => {
+      const win = mainWindow && !mainWindow.isDestroyed() ? mainWindow : openMainWindow(true);
+      win.webContents.setBackgroundThrottling(false);
+      if (!win.isVisible() && !win.isMinimized()) win.showInactive();
+      broadcast('export:cliRequest', null);
+    },
+    restoreThrottling: () => {
+      const wc = mainWindow?.webContents;
+      if (wc && !wc.isDestroyed() && ![...exporting.values()].includes(wc)) wc.setBackgroundThrottling(!SMOKE);
+    },
+    cancelExport: async (exportId) => {
+      releaseExport(exportId);
+      await endExport(exportId, true);
+    },
+    abortInRenderer: (requestId) => broadcast('export:cliCancel', requestId),
+    log: (line) => process.stderr.write(`${line}\n`),
+  });
+  failCliJobNow = (error) => cli.failNow(error);
   drainExportRequests = () => {
-    for (const path of exportRequests.splice(0)) void acceptExportRequest(path).catch((e: unknown) => process.stderr.write(`Export request failed: ${String(e)}\n`));
+    for (const path of exportRequests.splice(0)) void cli.accept(path).catch((e: unknown) => process.stderr.write(`Export request failed: ${String(e)}\n`));
   };
-  handleNoArgs('export:takeCliJob', (e): CliExportJob | null => {
-    if (!cliJob || cliJob.taken || e.sender !== mainWindow?.webContents) return null;
-    cliJob.taken = true;
-    return cliJob.job;
-  });
-  handle('export:cliReport', async (report, e) => {
-    if (!cliJob || report.requestId !== cliJob.job.requestId || e.sender !== mainWindow?.webContents) return;
-    if (report.state === 'refused') {
-      const { dir } = cliJob;
-      cliJob = null;
-      await refuseCli(dir, report.requestId, report.reason ?? 'invalid-request', report.error ?? 'Refused.');
-      return;
-    }
-    if (report.state === 'done') {
-      const problem = await completeFileProblem(report.outFile, report.bytes);
-      finishCli(problem ? 'failed' : 'done', problem ? { error: problem, outFile: report.outFile } : { outFile: report.outFile, bytes: report.bytes, phase: 'done' });
-      return;
-    }
-    if (report.state === 'failed') { finishCli('failed', { error: report.error, phase: report.phase, progress: report.progress }); return; }
-    const next = nextStatus(cliJob.status, report, new Date());
-    if (!next) return;
-    cliJob.status = next;
-    await saveCliStatus(cliJob.dir, next);
-  });
-  const failCliOnWindowLoss = (wc: Electron.WebContents) => {
-    const fail = () => { if (cliJob?.taken) finishCli('failed', { error: 'The Momotombo window closed during the export.' }); };
-    wc.once('destroyed', fail);
-    wc.on('render-process-gone', fail);
+  handleNoArgs('export:takeCliJob', (e): CliExportJob | null => cli.take(isMainWindow(e)));
+  handle('export:cliReport', (report, e) => cli.report(report, isMainWindow(e)));
+  watchCliWindow = (wc) => {
+    const lost = () => void cli.windowLost();
+    wc.once('destroyed', lost);
+    wc.on('render-process-gone', lost);
   };
-  watchCliWindow = failCliOnWindowLoss;
   handle('shell:showItem', ({ path }) => shell.showItemInFolder(path));
   handleNoArgs('settings:get', () => settingsInfo());
 

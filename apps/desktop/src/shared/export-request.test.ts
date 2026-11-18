@@ -1,7 +1,7 @@
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
-  EXPORT_REQUEST_FLAG, busyReason, exportRequestPathFromArgv, nextStatus, outPathProblem, parseExportRequest, parseExportStatus, startStatus, statusForRequest,
+  EXPORT_REQUEST_FLAG, busyReason, exportRequestPathFromArgv, nextStatus, outPathProblem, parseExportRequest, parseExportStatus, requestFileLocation, staleExportFiles, startStatus, statusForRequest,
   type ExportStatus,
 } from './export-request';
 
@@ -123,5 +123,38 @@ describe('status transitions', () => {
     const refused = startStatus('xr_0123456789abcdef', t0, { state: 'refused', reason: 'recording', error: 'busy' });
     expect(refused.finishedAt).toBe(t0.toISOString());
     expect(nextStatus(refused, running, t1)).toBeNull();
+  });
+});
+
+describe('requestFileLocation', () => {
+  it('names the project folder and request id of a CLI request file', () => {
+    expect(requestFileLocation(join(root, 'Demo abc', 'cache', 'export-request-xr_0123456789abcdef.json'), root))
+      .toEqual({ projectDir: join(root, 'Demo abc'), requestId: 'xr_0123456789abcdef' });
+  });
+
+  it.each([
+    ['outside the projects folder', '/tmp/cache/export-request-xr_0123456789abcdef.json'],
+    ['not in cache', join(root, 'Demo abc', 'export-request-xr_0123456789abcdef.json')],
+    ['deeper than a project', join(root, 'Demo abc', 'media', 'cache', 'export-request-xr_0123456789abcdef.json')],
+    ['another name', join(root, 'Demo abc', 'cache', 'export-request-xr_1.json')],
+    ['climbing back in', join(root, 'Demo abc', '..', '..', 'x', 'cache', 'export-request-xr_0123456789abcdef.json')],
+  ])('is null for a file %s', (_label, path) => {
+    expect(requestFileLocation(path, root)).toBeNull();
+  });
+});
+
+describe('staleExportFiles', () => {
+  const file = (id: string, kind: string, mtimeMs: number) => ({ name: `export-${kind}-xr_${id}${kind === 'cancel' ? '' : '.json'}`, mtimeMs });
+
+  it('keeps the newest requests and the current one, and names the rest', () => {
+    const entries = [
+      file('1'.repeat(16), 'status', 1), file('1'.repeat(16), 'request', 1),
+      file('2'.repeat(16), 'status', 2), file('3'.repeat(16), 'status', 3), file('3'.repeat(16), 'cancel', 3),
+      file('4'.repeat(16), 'status', 4), { name: 'thumbnail.jpg', mtimeMs: 0 },
+    ];
+    expect(staleExportFiles(entries, 2, `xr_${'1'.repeat(16)}`).sort()).toEqual([`export-status-xr_${'2'.repeat(16)}.json`]);
+    expect(staleExportFiles(entries, 1, `xr_${'4'.repeat(16)}`).sort()).toEqual([
+      `export-request-xr_${'1'.repeat(16)}.json`, `export-status-xr_${'1'.repeat(16)}.json`, `export-status-xr_${'2'.repeat(16)}.json`,
+    ]);
   });
 });

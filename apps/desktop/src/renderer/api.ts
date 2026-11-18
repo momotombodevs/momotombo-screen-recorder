@@ -85,6 +85,7 @@ export const api = {
   takeCliExportJob: () => call<CliExportJob | null>('export:takeCliJob'),
   reportCliExport: (report: CliExportReport) => call<void>('export:cliReport', report),
   onCliExportRequest: (fn: () => void) => bridge().on('export:cliRequest', () => fn()),
+  onCliExportCancel: (fn: (requestId: string) => void) => bridge().on('export:cliCancel', (id) => fn(String(id))),
   exportEnd: (exportId: string, cancel = false) => call<{ path: string; bytes: number } | null>('export:end', { exportId, cancel }),
   showItem: (path: string) => call<void>('shell:showItem', { path }),
 

@@ -45,6 +45,7 @@ import {
 import { SAMPLE_RATE, mixTimelineAudio } from "./audio-mix";
 
 export { AudioReadError, mixTimelineAudio } from "./audio-mix";
+import { exportBaseName } from "../../shared/export-name";
 
 export type { ExportFormat };
 
@@ -85,10 +86,7 @@ export interface ExportProgress {
 }
 
 
-/** The file name an export suggests, without extension: project and format ("Demo 16x9"). */
-export function exportBaseName(project: Project, variantId: ID): string {
-  return `${project.name} ${activeVariant(project, variantId).name.replace(":", "x")}`;
-}
+export { exportBaseName };
 
 export function outputSize(
   project: Project,

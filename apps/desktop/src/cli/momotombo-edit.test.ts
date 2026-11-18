@@ -255,19 +255,61 @@ describe('export', () => {
     expect(failed.err).toMatch(/disk full/);
   });
 
-  it('never takes another request\'s status for this one, and gives up at --timeout', async () => {
+  it('never takes another request\'s status for this one, and fails fast when the app never answers', async () => {
     await saveProject('a', 'Demo', '2026-11-01T00:00:00.000Z');
-    const { code, err } = await exportCli(['latest', '--timeout', '0.2'], async (_r, file) =>
-      writeFile(file, status('xr_ffffffffffffffff', { state: 'done', outFile: '/old.mp4', bytes: 1 })));
-    expect(code).toBe(EXIT.timeout);
-    expect(err).toMatch(/did not take the export request within 0.2 s/);
+    const { code, err } = await exportCli(['latest'], async (_r, file) =>
+      writeFile(file, status('xr_ffffffffffffffff', { state: 'done', outFile: '/old.mp4', bytes: 1 })), { takeDeadlineMs: 150 });
+    expect(code).toBe(EXIT.usage);
+    expect(err).toMatch(/did not acknowledge the export request within 0 s/);
   });
 
-  it('reports how far the export got when it times out', async () => {
+  it('cancels the export at --timeout and says how far it got', async () => {
     await saveProject('a', 'Demo', '2026-11-01T00:00:00.000Z');
-    const { code, err } = await exportCli(['latest', '--timeout', '0.2'], async (r, file) => writeFile(file, status(r.requestId, { progress: 0.4 })));
+    const { code, err } = await exportCli(['latest', '--timeout', '0.2'], async (r, file) => {
+      await writeFile(file, status(r.requestId, { progress: 0.4 }));
+      const cancel = join(dirname(file), `export-cancel-${r.requestId}`);
+      while (!(await readFile(cancel).then(() => true, () => false))) await new Promise((x) => setTimeout(x, 10));
+      await writeFile(file, status(r.requestId, { state: 'failed', progress: 0.4, error: 'Cancelled by momotombo-edit' }));
+    });
     expect(code).toBe(EXIT.timeout);
-    expect(err).toMatch(/the export is running at 40% \(.*export-status-xr_[0-9a-f]{16}\.json\)/);
+    expect(err).toMatch(/No result after 0.2 s \(it was running at 40%\); the app cancelled it and removed the partial file/);
+  });
+
+  it('says when the app does not confirm a cancellation', async () => {
+    await saveProject('a', 'Demo', '2026-11-01T00:00:00.000Z');
+    const { code, err } = await exportCli(['latest', '--timeout', '0.2'], async (r, file) => writeFile(file, status(r.requestId, { progress: 0.4 })), { cancelWaitMs: 50 });
+    expect(code).toBe(EXIT.timeout);
+    expect(err).toMatch(/did not confirm the cancellation \(.*export-status-xr_[0-9a-f]{16}\.json\)/);
+  });
+
+  it('cancels the export when interrupted', async () => {
+    await saveProject('a', 'Demo', '2026-11-01T00:00:00.000Z');
+    const interrupt = new AbortController();
+    const { code, err } = await exportCli(['latest'], async (r, file) => {
+      await writeFile(file, status(r.requestId, { progress: 0.1 }));
+      interrupt.abort();
+    }, { interrupt: interrupt.signal, cancelWaitMs: 50 });
+    expect(code).toBe(EXIT.interrupted);
+    expect(err).toMatch(/Interrupted \(it was running at 10%\)/);
+  });
+
+  it('exits 3 when the app rejects the request as invalid', async () => {
+    await saveProject('a', 'Demo', '2026-11-01T00:00:00.000Z');
+    const { code } = await exportCli(['latest'], async (r, file) =>
+      writeFile(file, status(r.requestId, { state: 'refused', reason: 'invalid-request', error: 'bad --out' })));
+    expect(code).toBe(EXIT.invalid);
+  });
+
+  it('fails when the app wrote a different file than --out', async () => {
+    await saveProject('a', 'Demo', '2026-11-01T00:00:00.000Z');
+    const out = join(dirname(root), 'wanted.mp4');
+    const other = join(dirname(root), 'wanted (2).mp4');
+    const { code, err } = await exportCli(['latest', '--out', out], async (r, file) => {
+      await writeFile(other, 'abc');
+      await writeFile(file, status(r.requestId, { state: 'done', outFile: other, bytes: 3 }));
+    });
+    expect(code).toBe(EXIT.failed);
+    expect(err).toMatch(/wrote .*wanted \(2\)\.mp4 instead of/);
   });
 
   it('does not report success for a file that is missing or incomplete', async () => {

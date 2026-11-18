@@ -16,7 +16,7 @@ const INVOKE = new Set([
   'media:pickVideo', 'media:importVideo', 'media:discardImport',
 ]);
 
-const EVENTS = new Set(['settings:changed', 'projects:changed', 'projects:openRequest', 'export:cliRequest', 'capture:state', 'capture:finished', 'capture:releaseDevices', 'capture:recovered', 'cw:prepare', 'cw:go', 'cw:pause', 'cw:resume', 'cw:stop']);
+const EVENTS = new Set(['settings:changed', 'projects:changed', 'projects:openRequest', 'export:cliRequest', 'export:cliCancel', 'capture:state', 'capture:finished', 'capture:releaseDevices', 'capture:recovered', 'cw:prepare', 'cw:go', 'cw:pause', 'cw:resume', 'cw:stop']);
 
 contextBridge.exposeInMainWorld('momotombo', {
   invoke(channel: string, payload?: unknown): Promise<unknown> {
