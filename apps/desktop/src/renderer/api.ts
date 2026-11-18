@@ -1,7 +1,8 @@
 import type {
-  AppInfo, BackendInfo, CaptureConfig, CaptureResult, CaptureState, OpenedProject, PermissionInfo, ProjectSummary, RecoveryNotice, SourceInfo, ImportedVideo, PickedFile, ThirdPartyInfo, ExportTarget, EncoderInfo,
+  AppInfo, BackendInfo, CaptureConfig, CaptureResult, CaptureState, OpenedProject, PermissionInfo, ProjectSummary, RecoveryNotice, SourceInfo, ImportedVideo, PickedFile, ThirdPartyInfo, ExportTarget, EncoderInfo, RecorderPrefs, CliExportJob, CliExportReport, PeaksStamp,
 } from '@momotombo/protocol';
 import type { LangSetting, SettingsInfo } from '../shared/i18n';
+import type { DiskEstimate } from '../shared/recording-budget';
 
 interface Bridge {
   invoke(channel: string, payload?: unknown): Promise<unknown>;
@@ -33,7 +34,13 @@ export const api = {
   trashProject: (id: string) => call<void>('projects:trash', { id }),
   revealProject: (id: string) => call<void>('projects:reveal', { id }),
   readProjectText: (id: string, path: string) => call<string>('projects:readText', { id, path }),
+  readPeaks: (id: string, file: string) => call<{ stamp: PeaksStamp; data: Uint8Array | null }>('projects:readPeaks', { id, file }),
+  writePeaks: (id: string, file: string, stamp: PeaksStamp, data: Uint8Array) => call<boolean>('projects:writePeaks', { id, file, stamp, data }),
   setThumbnail: (id: string, dataUrl: string) => call<void>('projects:setThumbnail', { id, dataUrl }),
+  onProjectChanged: (fn: (change: { id: string; json: unknown }) => void) => bridge().on('projects:changed', (d) => fn(d as { id: string; json: unknown })),
+  closeProject: () => call<void>('projects:close'),
+  takeOpenRequest: () => call<string | null>('projects:takeOpenRequest'),
+  onOpenRequest: (fn: () => void) => bridge().on('projects:openRequest', () => fn()),
 
   permissions: () => call<PermissionInfo>('permissions:get'),
   requestPermission: (kind: 'camera' | 'microphone' | 'screen') => call<boolean>('permissions:request', { kind }),
@@ -44,6 +51,9 @@ export const api = {
   sources: () => call<SourceInfo[]>('capture:sources'),
   captureState: () => call<CaptureState>('capture:state'),
   startCapture: (config: CaptureConfig) => call<void>('capture:start', config),
+  diskEstimate: (config: CaptureConfig) => call<DiskEstimate>('capture:diskEstimate', config),
+  recorderPrefs: () => call<RecorderPrefs>('recorder:prefs'),
+  setRecorderPrefs: (patch: Partial<RecorderPrefs>) => call<RecorderPrefs>('recorder:setPrefs', patch),
   pauseCapture: () => call<void>('capture:pause'),
   resumeCapture: () => call<void>('capture:resume'),
   markCapture: () => call<void>('capture:mark'),
@@ -74,6 +84,10 @@ export const api = {
     call<void>('export:mfWrite', { exportId, kind, time, duration, data }),
   exportBegin: (token: string) => call<{ exportId: string; path: string }>('export:begin', { token }),
   exportWrite: (exportId: string, position: number | null, data: Uint8Array) => call<void>('export:write', { exportId, position, data }),
+  takeCliExportJob: () => call<CliExportJob | null>('export:takeCliJob'),
+  reportCliExport: (report: CliExportReport) => call<void>('export:cliReport', report),
+  onCliExportRequest: (fn: () => void) => bridge().on('export:cliRequest', () => fn()),
+  onCliExportCancel: (fn: (requestId: string) => void) => bridge().on('export:cliCancel', (id) => fn(String(id))),
   exportEnd: (exportId: string, cancel = false) => call<{ path: string; bytes: number } | null>('export:end', { exportId, cancel }),
   showItem: (path: string) => call<void>('shell:showItem', { path }),
 

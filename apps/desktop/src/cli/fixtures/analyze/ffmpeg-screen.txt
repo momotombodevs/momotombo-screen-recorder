@@ -1,0 +1,4 @@
+[Parsed_freezedetect_1 @ 0x7b75049980] lavfi.freezedetect.freeze_start: 2.718333
+[Parsed_freezedetect_1 @ 0x7b75049980] lavfi.freezedetect.freeze_duration: 2.033333
+[Parsed_freezedetect_1 @ 0x7b75049980] lavfi.freezedetect.freeze_end: 4.751667
+[Parsed_freezedetect_1 @ 0x7b75049980] lavfi.freezedetect.freeze_start: 10.435

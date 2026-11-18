@@ -1,9 +1,9 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import {
   BACKGROUND_PRESETS, DEFAULT_CAMERA_MOVE, DEFAULT_CAMERA_SPLIT, MAGNIFIER_LIMITS, activeVariant, addCameraMoveAt, setCameraMovePosition, layoutSegments, presetTransition, removeCameraLayout,
   removeMagnifier, removePrivacy, removeSegment, removeZoom, resolvedBaseCamera, resolvedFrameStyle, setAudio, setStyle, setSyncOffset,
   setZoomSensitivity, timelineToSource, updateCameraLayout, updateMagnifier, updatePrivacy, updateVariant, updateZoom,
-  type Background, type CameraLayout, type CameraShape, type DeepPartial, type Easing, type MagnifierShape, type MagnifierStyle,
+  AUDIO_LIMITS, MAX_AUDIO_GAIN, type AudioChannel, type Background, type CameraLayout, type CameraShape, type DeepPartial, type Easing, type MagnifierShape, type MagnifierStyle,
   type PrivacyEffect, type Project, type Transition, type ZoomItem,
   pictureAspect,
 } from '@momotombo/project-model';
@@ -13,10 +13,13 @@ import { useEditor, type EditorStore, type InspectorTab } from '../../state/edit
 import { Button, ColorInput, Section, Segmented, Select, Slider, Swatch, Toggle } from '../../ui/controls';
 import { Icon } from '../../ui/icons';
 import { addMagnifierAt, place } from './placement';
+import { TextPanel } from './TextPanel';
 import { PLACE_GRID, placeName } from './camera-names';
 import { clearZoomSuggestions, noSuggestionMessage, runZoomSuggestions, type ZoomRun } from './zoom-actions';
 import { t } from '../../i18n';
 import { probe } from '../../perf-probe';
+import type { Loudness } from '../../audio/measure';
+import { VOICE_PRESET, normalizeGainDb } from '../../audio/voice-chain';
 
 const pct = (v: number) => `${Math.round(v * 100)}%`;
 const secs = (v: number) => t("{n} s", { n: v.toFixed(2) });
@@ -148,6 +151,11 @@ function SelectedPanel({ store, player }: { store: EditorStore; player: Player }
         <Button icon="trash" variant="ghost" size="sm" onClick={() => store.apply((p) => removeMagnifier(p, it.id))}>{t("Eliminar lupa")}</Button>
       </div>
     );
+  }
+
+  if (selection.kind === 'text') {
+    const it = project.texts.find((i) => i.id === selection.id);
+    return it ? <TextPanel key={it.id} store={store} item={it} onClose={close} /> : null;
   }
 
   if (selection.kind === 'privacy') {
@@ -447,18 +455,62 @@ function MagnifierTab({ store }: { store: EditorStore }) {
   );
 }
 
-function AudioTab({ store }: { store: EditorStore }) {
+const GAIN = { min: 0, max: MAX_AUDIO_GAIN, step: 0.05 };
+const hasVoiceEnhance = (c: AudioChannel) => c.highpassHz > 0 || c.compressor.enabled || c.gate.enabled || c.normalize.enabled;
+const VOICE_OFF = { highpassHz: 0, compressor: { enabled: false }, gate: { enabled: false }, normalize: { enabled: false } } satisfies DeepPartial<AudioChannel>;
+const db = (v: number) => t("{n} dB", { n: Math.round(v) });
+
+function loudnessNote(l: Loudness, n: AudioChannel['normalize']): string {
+  if (l.state === 'off') return t("Activa «Normalizar el volumen» para medirlo.");
+  if (l.state === 'measuring') return t("Midiendo el volumen…");
+  if (l.state === 'failed') return t("No se pudo medir el volumen.");
+  if (l.lufs === null) return t("No hay voz que medir.");
+  const gain = normalizeGainDb(n, l.lufs);
+  return t("Volumen medido: {n} LUFS · ganancia aplicada {g} dB", { n: l.lufs.toFixed(1), g: `${gain >= 0 ? '+' : '−'}${Math.abs(gain).toFixed(1)}` });
+}
+
+function VoiceEnhance({ store, player, mic }: { store: EditorStore; player: Player; mic: AudioChannel }) {
+  const info = useSyncExternalStore(player.onAudioInfo, player.audioInfo);
+  const set = (patch: DeepPartial<AudioChannel>, coalesce?: string) =>
+    store.apply((p) => setAudio(p, { mic: patch }), coalesce ? { coalesce } : {});
+  const n = mic.normalize;
+  return (
+    <Section title={t("Mejora de voz")}>
+      <Toggle label={t("Mejorar la voz")} hint={t("Quita graves, comprime suave y lleva el volumen a −16 LUFS")} checked={hasVoiceEnhance(mic)}
+        onChange={(on) => set(on ? VOICE_PRESET : VOICE_OFF)} />
+      <Slider label={t("Filtro de graves")} value={mic.highpassHz} min={0} max={300} step={10} onChange={(highpassHz) => set({ highpassHz }, 'mic-hp')}
+        format={(v) => (v === 0 ? t("Apagado") : t("{n} Hz", { n: v }))} />
+      <Toggle label={t("Compresor")} checked={mic.compressor.enabled} onChange={(enabled) => set({ compressor: { enabled } })} />
+      {mic.compressor.enabled && <>
+        <Slider label={t("Umbral")} value={mic.compressor.thresholdDb} min={-60} max={0} step={1} onChange={(thresholdDb) => set({ compressor: { thresholdDb } }, 'mic-comp-t')} format={db} />
+        <Slider label={t("Relación")} value={mic.compressor.ratio} min={1} max={10} step={0.5} onChange={(ratio) => set({ compressor: { ratio } }, 'mic-comp-r')} format={(v) => `${v}:1`} />
+      </>}
+      <Toggle label={t("Puerta de ruido")} hint={t("Silencia el ruido de fondo entre frases")} checked={mic.gate.enabled} onChange={(enabled) => set({ gate: { enabled } })} />
+      {mic.gate.enabled && <Slider label={t("Umbral de la puerta")} value={mic.gate.thresholdDb} min={-80} max={-20} step={1} onChange={(thresholdDb) => set({ gate: { thresholdDb } }, 'mic-gate')} format={db} />}
+      <Toggle label={t("Normalizar el volumen")} checked={n.enabled} onChange={(enabled) => set({ normalize: { enabled } })} />
+      {n.enabled && <Slider label={t("Volumen objetivo")} value={n.targetLufs} min={AUDIO_LIMITS.normalize.targetLufs.min} max={AUDIO_LIMITS.normalize.targetLufs.max} step={1} onChange={(targetLufs) => set({ normalize: { targetLufs } }, 'mic-lufs')} format={(v) => t("{n} LUFS", { n: v })} />}
+      <p className="muted small" aria-live="polite">{loudnessNote(info.mic, n)}</p>
+      {info.enhancementUnavailable && hasVoiceEnhance(mic) && (
+        <p className="note"><Icon name="info" size={14} />{t("La vista previa suena sin la mejora de voz; la exportación sí la aplica.")}</p>
+      )}
+    </Section>
+  );
+}
+
+function AudioTab({ store, player }: { store: EditorStore; player: Player }) {
   const project = useEditor(store, (s) => s.project);
   const a = project.audio;
   const recs = Object.values(project.recordings);
+  const hasMic = recs.some((r) => r.sources.mic);
   return (
     <>
       <Section title={t("Niveles de audio")}>
-        <Slider label={t("Micrófono")} value={a.mic.gain} min={0} max={1} onChange={(gain) => store.apply((p) => setAudio(p, { mic: { gain } }), { coalesce: 'mic' })} format={pct} />
+        <Slider label={t("Micrófono")} value={a.mic.gain} {...GAIN} onChange={(gain) => store.apply((p) => setAudio(p, { mic: { gain } }), { coalesce: 'mic' })} format={pct} />
         <Toggle label={t("Silenciar el micrófono")} checked={a.mic.muted} onChange={(muted) => store.apply((p) => setAudio(p, { mic: { muted } }))} />
-        <Slider label={t("Audio del sistema")} value={a.system.gain} min={0} max={1} onChange={(gain) => store.apply((p) => setAudio(p, { system: { gain } }), { coalesce: 'sys' })} format={pct} />
+        <Slider label={t("Audio del sistema")} value={a.system.gain} {...GAIN} onChange={(gain) => store.apply((p) => setAudio(p, { system: { gain } }), { coalesce: 'sys' })} format={pct} />
         <Toggle label={t("Silenciar el audio del sistema")} checked={a.system.muted} onChange={(muted) => store.apply((p) => setAudio(p, { system: { muted } }))} />
       </Section>
+      {hasMic && <VoiceEnhance store={store} player={player} mic={a.mic} />}
       {recs.map((r, i) => (
         <Section key={r.id} title={t("Sincronía · Grabación {n}", { n: i + 1 })} defaultOpen={false}>
           <p className="muted small">{t("Desplaza una fuente si llega tarde. Un valor positivo retrasa la fuente.")}</p>
@@ -536,7 +588,7 @@ export function Inspector({ store, player }: { store: EditorStore; player: Playe
         {tab === 'camera' && <CameraTab store={store} />}
         {tab === 'cursor' && <CursorTab store={store} />}
         {tab === 'magnifier' && <MagnifierTab store={store} />}
-        {tab === 'audio' && <AudioTab store={store} />}
+        {tab === 'audio' && <AudioTab store={store} player={player} />}
         {tab === 'zoom' && <ZoomTab store={store} />}
       </div>
     </aside>

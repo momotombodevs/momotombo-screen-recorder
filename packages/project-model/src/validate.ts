@@ -1,4 +1,5 @@
 import type { Transition } from "./easing";
+import { AUDIO_LIMITS, MAGNIFIER_LIMITS, TEXT_LIMITS } from "./factory";
 import { sortedByStart, sortedByTime } from "./sorting";
 import type {
   Background,
@@ -13,19 +14,66 @@ import type {
   Recording,
   Sequence,
   Style,
+  TextItem,
   Variant,
   ZoomItem,
 } from "./types";
+import {
+  TEXT_ALIGNS,
+  TEXT_ANCHORS,
+  TEXT_ANIMATION_KINDS,
+  TEXT_WEIGHTS,
+} from "./types";
 
-export class ProjectFormatError extends Error {}
+/** Why a field is invalid, so each surface can word it in its own language. */
+export type FormatRule =
+  | { kind: "type"; expected: "number" | "integer" | "text" | "boolean" | "list" | "object" | "color" }
+  | { kind: "min" | "max" | "above"; limit: number }
+  | { kind: "oneOf"; values: readonly (string | number)[] }
+  | { kind: "fps"; min: number; max: number }
+  | { kind: "order"; later: string; earlier: string }
+  | { kind: "missingRecording" }
+  | { kind: "count"; count: number }
+  | { kind: "empty" }
+  | { kind: "tooLong"; limit: number };
+
+const TYPE_ES: Record<Extract<FormatRule, { kind: "type" }>["expected"], string> = {
+  number: "no es un número finito",
+  integer: "no es un número entero",
+  text: "no es texto",
+  boolean: "no es verdadero/falso",
+  list: "no es una lista",
+  object: "no es un objeto",
+  color: "debe ser un color #rrggbb",
+};
+
+function spanishReason(rule: FormatRule): string {
+  switch (rule.kind) {
+    case "type": return TYPE_ES[rule.expected];
+    case "min": return `menor que ${rule.limit}`;
+    case "max": return `mayor que ${rule.limit}`;
+    case "above": return `debe ser mayor que ${rule.limit}`;
+    case "oneOf": return `debe ser ${rule.values.join(" | ")}`;
+    case "fps": return `debe estar entre ${rule.min} y ${rule.max} cuadros por segundo`;
+    case "order": return `${rule.later} debe ser posterior a ${rule.earlier}`;
+    case "missingRecording": return "la grabación no existe";
+    case "count": return `debe tener ${rule.count} colores`;
+    case "empty": return "está vacío";
+    case "tooLong": return `más de ${rule.limit} caracteres`;
+  }
+}
+
+export class ProjectFormatError extends Error {
+  constructor(message: string, readonly field?: string, readonly rule?: FormatRule) {
+    super(message);
+  }
+}
 
 type Obj = Record<string, unknown>;
 type Check = (v: unknown, path: string) => void;
 
-function fail(path: string, why = ""): never {
-  throw new ProjectFormatError(
-    `Campo no válido: ${path}${why ? ` (${why})` : ""}`,
-  );
+function fail(path: string, rule: FormatRule): never {
+  throw new ProjectFormatError(`Campo no válido: ${path} (${spanishReason(rule)})`, path, rule);
 }
 
 export function isObj(v: unknown): v is Obj {
@@ -33,12 +81,12 @@ export function isObj(v: unknown): v is Obj {
 }
 
 function obj(v: unknown, path: string): Obj {
-  if (!isObj(v)) fail(path, "no es un objeto");
+  if (!isObj(v)) fail(path, { kind: "type", expected: "object" });
   return v;
 }
 
 function arr(v: unknown, path: string): unknown[] {
-  if (!Array.isArray(v)) fail(path, "no es una lista");
+  if (!Array.isArray(v)) fail(path, { kind: "type", expected: "list" });
   return v;
 }
 
@@ -51,12 +99,12 @@ interface NumRange {
 
 function num(v: unknown, path: string, r: NumRange = {}): number {
   if (typeof v !== "number" || !Number.isFinite(v))
-    fail(path, "no es un número finito");
-  if (r.int && !Number.isInteger(v)) fail(path, "no es un número entero");
-  if (r.min !== undefined && v < r.min) fail(path, `menor que ${r.min}`);
-  if (r.max !== undefined && v > r.max) fail(path, `mayor que ${r.max}`);
+    fail(path, { kind: "type", expected: "number" });
+  if (r.int && !Number.isInteger(v)) fail(path, { kind: "type", expected: "integer" });
+  if (r.min !== undefined && v < r.min) fail(path, { kind: "min", limit: r.min });
+  if (r.max !== undefined && v > r.max) fail(path, { kind: "max", limit: r.max });
   if (r.above !== undefined && v <= r.above)
-    fail(path, `debe ser mayor que ${r.above}`);
+    fail(path, { kind: "above", limit: r.above });
   return v;
 }
 
@@ -64,12 +112,12 @@ const tick = (v: unknown, path: string, min = -Number.MAX_SAFE_INTEGER) =>
   num(v, path, { min, max: Number.MAX_SAFE_INTEGER });
 
 function str(v: unknown, path: string): string {
-  if (typeof v !== "string") fail(path, "no es texto");
+  if (typeof v !== "string") fail(path, { kind: "type", expected: "text" });
   return v;
 }
 
 function bool(v: unknown, path: string): boolean {
-  if (typeof v !== "boolean") fail(path, "no es verdadero/falso");
+  if (typeof v !== "boolean") fail(path, { kind: "type", expected: "boolean" });
   return v;
 }
 
@@ -78,7 +126,7 @@ function oneOf<T extends string>(
   path: string,
   values: readonly T[],
 ): T {
-  if (!values.includes(v as T)) fail(path, `debe ser ${values.join(" | ")}`);
+  if (!values.includes(v as T)) fail(path, { kind: "oneOf", values });
   return v as T;
 }
 
@@ -198,10 +246,10 @@ const CURSOR_FIELDS: Record<keyof CursorStyle, Check> = {
 };
 
 const MAGNIFIER_FIELDS: Record<keyof MagnifierStyle, Check> = {
-  size: num,
-  zoom: num,
+  size: (v, p) => num(v, p, MAGNIFIER_LIMITS.size),
+  zoom: (v, p) => num(v, p, MAGNIFIER_LIMITS.zoom),
   shape: (v, p) => oneOf(v, p, ["circle", "rounded"] as const),
-  border,
+  border: (v, p) => fields({ width: (x, q) => num(x, q, MAGNIFIER_LIMITS.border), color: str }, v, p),
   hideWhenIdle: bool,
 };
 
@@ -225,7 +273,7 @@ function background(v: unknown, path: string): asserts v is Background {
       break;
     case "aurora": {
       const colors = arr(b.colors, `${path}.colors`);
-      if (colors.length !== 4) fail(`${path}.colors`, "debe tener 4 colores");
+      if (colors.length !== 4) fail(`${path}.colors`, { kind: "count", count: 4 });
       colors.forEach((c, i) => str(c, `${path}.colors[${i}]`));
       num(b.seed, `${path}.seed`);
       num(b.grain, `${path}.grain`);
@@ -328,30 +376,27 @@ export function validateSequence(
   const n = num(fps.num, "sequence.fps.num", { int: true, min: 1 });
   const d = num(fps.den, "sequence.fps.den", { int: true, min: 1 });
   if (n / d < FPS_RANGE.min || n / d > FPS_RANGE.max)
-    fail(
-      "sequence.fps",
-      `debe estar entre ${FPS_RANGE.min} y ${FPS_RANGE.max} cuadros por segundo`,
-    );
+    fail("sequence.fps", { kind: "fps", min: FPS_RANGE.min, max: FPS_RANGE.max });
   arr(seq.segments, "sequence.segments").forEach((s, i) => {
     const path = `sequence.segments[${i}]`;
     const o = obj(s, path);
     str(o.id, `${path}.id`);
     if (!Object.hasOwn(recordings, str(o.recordingId, `${path}.recordingId`)))
-      fail(`${path}.recordingId`, "la grabación no existe");
+      fail(`${path}.recordingId`, { kind: "missingRecording" });
     const start = tick(o.sourceStart, `${path}.sourceStart`, 0);
     const end = tick(o.sourceEnd, `${path}.sourceEnd`, 0);
-    if (end <= start) fail(path, "sourceEnd debe ser posterior a sourceStart");
+    if (end <= start) fail(path, { kind: "order", later: "sourceEnd", earlier: "sourceStart" });
   });
 }
 
 function itemBase(v: unknown, path: string, type: string): Obj {
   const o = obj(v, path);
-  if (o.type !== type) fail(`${path}.type`, `debe ser ${type}`);
+  if (o.type !== type) fail(`${path}.type`, { kind: "oneOf", values: [type] });
   str(o.id, `${path}.id`);
   str(o.recordingId, `${path}.recordingId`);
   const start = tick(o.start, `${path}.start`);
   const end = tick(o.end, `${path}.end`);
-  if (end <= start) fail(path, "end debe ser posterior a start");
+  if (end <= start) fail(path, { kind: "order", later: "end", earlier: "start" });
   oneOf(o.origin, `${path}.origin`, ["auto", "manual"] as const);
   return o;
 }
@@ -423,9 +468,73 @@ function privacyItem(v: unknown, path: string): PrivacyItem {
 
 function magnifierItem(v: unknown, path: string): MagnifierItem {
   const o = itemBase(v, path, "magnifier");
-  num(o.size, `${path}.size`);
-  num(o.zoom, `${path}.zoom`);
+  num(o.size, `${path}.size`, MAGNIFIER_LIMITS.size);
+  num(o.zoom, `${path}.zoom`, MAGNIFIER_LIMITS.zoom);
   return o as unknown as MagnifierItem;
+}
+
+const hex: Check = (v, p) => {
+  if (typeof v !== "string" || !/^#[0-9a-fA-F]{6}$/.test(v))
+    fail(p, { kind: "type", expected: "color" });
+};
+const within =
+  (r: { min: number; max: number }): Check =>
+  (x, q) =>
+    num(x, q, r);
+const textAnimation: Check = (v, p) =>
+  fields(
+    {
+      kind: (x, q) => oneOf(x, q, TEXT_ANIMATION_KINDS),
+      duration: within(TEXT_LIMITS.animation),
+    },
+    v,
+    p,
+  );
+
+function textItem(v: unknown, path: string): TextItem {
+  const o = itemBase(v, path, "text");
+  const L = TEXT_LIMITS;
+  const text = str(o.text, `${path}.text`);
+  if (text.trim() === "") fail(`${path}.text`, { kind: "empty" });
+  if (text.length > L.length)
+    fail(`${path}.text`, { kind: "tooLong", limit: L.length });
+  fields(
+    {
+      position: (x, q) =>
+        fields({ x: within({ min: 0, max: 1 }), y: within({ min: 0, max: 1 }) }, x, q),
+      anchor: (x, q) => oneOf(x, q, TEXT_ANCHORS),
+      align: (x, q) => oneOf(x, q, TEXT_ALIGNS),
+      fontSize: within(L.fontSize),
+      fontWeight: (x, q) => {
+        if (!TEXT_WEIGHTS.includes(x as never))
+          fail(q, { kind: "oneOf", values: TEXT_WEIGHTS });
+      },
+      color: hex,
+      maxWidth: within(L.maxWidth),
+      enter: textAnimation,
+      exit: textAnimation,
+    },
+    o,
+    path,
+  );
+  optional(o, "background", path, (x, q) =>
+    fields(
+      { color: hex, opacity: within({ min: 0, max: 1 }), padding: within(L.padding), radius: within(L.radius) },
+      x,
+      q,
+    ),
+  );
+  optional(o, "stroke", path, (x, q) =>
+    fields({ color: hex, width: within(L.stroke) }, x, q),
+  );
+  optional(o, "shadow", path, (x, q) =>
+    fields(
+      { color: hex, opacity: within({ min: 0, max: 1 }), blur: within(L.blur), offsetY: within(L.offsetY) },
+      x,
+      q,
+    ),
+  );
+  return o as unknown as TextItem;
 }
 
 function items<T extends { start: number }>(
@@ -447,6 +556,7 @@ export const validateCameraLayouts = (v: unknown) =>
 export const validatePrivacy = (v: unknown) => items(v, "privacy", privacyItem);
 export const validateMagnifiers = (v: unknown) =>
   items(v, "magnifiers", magnifierItem);
+export const validateTexts = (v: unknown) => items(v, "texts", textItem);
 
 const MAX_OUTPUT_SIDE = 16384;
 
@@ -469,7 +579,19 @@ export function validateVariants(v: unknown): asserts v is Variant[] {
 }
 
 const channel: Check = (v, p) =>
-  fields({ gain: (x, q) => num(x, q, { min: 0 }), muted: bool }, v, p);
+  fields(
+    {
+      gain: within(AUDIO_LIMITS.gain),
+      muted: bool,
+      highpassHz: within(AUDIO_LIMITS.highpassHz),
+      compressor: (x, q) =>
+        fields({ enabled: bool, thresholdDb: within(AUDIO_LIMITS.compressor.thresholdDb), ratio: within(AUDIO_LIMITS.compressor.ratio) }, x, q),
+      gate: (x, q) => fields({ enabled: bool, thresholdDb: within(AUDIO_LIMITS.gate.thresholdDb) }, x, q),
+      normalize: (x, q) => fields({ enabled: bool, targetLufs: within(AUDIO_LIMITS.normalize.targetLufs) }, x, q),
+    },
+    v,
+    p,
+  );
 
 export function validateAudio(v: unknown): asserts v is Project["audio"] {
   fields({ mic: channel, system: channel }, v, "audio");

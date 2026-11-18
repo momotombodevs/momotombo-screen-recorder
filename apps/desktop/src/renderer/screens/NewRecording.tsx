@@ -1,6 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import type { BackendInfo, CaptureConfig, PermissionInfo, SourceInfo } from '@momotombo/protocol';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { DEFAULT_RECORDER_PREFS, type BackendInfo, type CaptureConfig, type PermissionInfo, type PermissionStatus, type RecorderPrefs, type SourceInfo } from '@momotombo/protocol';
+import type { DiskEstimate } from '../../shared/recording-budget';
 import { api } from '../api';
+import { inputProblem, micConstraints, resolveDeviceId, type InputProblem } from '../recorder-inputs';
+import { streamReadings, useMicMeter } from '../use-mic-meter';
 import { Badge, Button, IconButton, Segmented, Select, Toggle } from '../ui/controls';
 import { Icon } from '../ui/icons';
 import { keyLabel, RECORDING_KEYS } from '../ui/keys';
@@ -8,6 +11,12 @@ import { t } from '../i18n';
 
 type Kind = 'display' | 'window' | 'region';
 interface Region { x: number; y: number; w: number; h: number }
+type OpenState = 'opening' | 'open' | 'failed';
+
+function openFailure(e: unknown): { permission?: PermissionStatus } {
+  const name = (e as DOMException).name;
+  return name === 'NotAllowedError' || name === 'SecurityError' ? { permission: 'denied' } : {};
+}
 
 function useDevices(kind: 'videoinput' | 'audioinput', enabled: boolean) {
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
@@ -32,21 +41,28 @@ export function NewRecording(props: { initialKind?: Kind; onBack: () => void; on
   const [perms, setPerms] = useState<PermissionInfo | null>(null);
   const [backends, setBackends] = useState<BackendInfo[]>([]);
   const [backend, setBackend] = useState<'auto' | 'native' | 'web'>('auto');
-  const [cameraOn, setCameraOn] = useState(true);
-  const [micOn, setMicOn] = useState(true);
-  const [cameraId, setCameraId] = useState<string>('');
-  const [micId, setMicId] = useState<string>('');
-  const [systemAudio, setSystemAudio] = useState(true);
-  const [fps, setFps] = useState<30 | 60>(60);
-  const [quality, setQuality] = useState<'standard' | 'high' | 'max'>('high');
-  const [countdown, setCountdown] = useState(3);
+  const [prefs, setPrefs] = useState<RecorderPrefs | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
-  const [level, setLevel] = useState(0);
+  const [camState, setCamState] = useState<OpenState>('opening');
+  const [micState, setMicState] = useState<OpenState>('opening');
+  const [micStream, setMicStream] = useState<MediaStream | null>(null);
+  const [disk, setDisk] = useState<DiskEstimate | null>(null);
   const camVideo = useRef<HTMLVideoElement>(null);
   const streams = useRef<MediaStream[]>([]);
-  const cams = useDevices('videoinput', cameraOn);
-  const mics = useDevices('audioinput', micOn);
+  const p = prefs ?? DEFAULT_RECORDER_PREFS;
+  const { cameraOn, micOn, systemAudio, fps, quality, countdown } = p;
+  const prefsLoaded = prefs !== null;
+  const cams = useDevices('videoinput', prefsLoaded && cameraOn);
+  const mics = useDevices('audioinput', prefsLoaded && micOn);
+  const cameraId = resolveDeviceId(cams.devices, p.cameraDeviceId);
+  const micId = resolveDeviceId(mics.devices, p.micDeviceId);
+
+  useEffect(() => { void api.recorderPrefs().then(setPrefs, () => setPrefs(DEFAULT_RECORDER_PREFS)); }, []);
+  const remember = useCallback((patch: Partial<RecorderPrefs>) => {
+    setPrefs((cur) => ({ ...(cur ?? DEFAULT_RECORDER_PREFS), ...patch }));
+    void api.setRecorderPrefs(patch).catch(() => undefined);
+  }, []);
 
   const loadSources = useCallback(async () => {
     setSources(null);
@@ -74,9 +90,6 @@ export function NewRecording(props: { initialKind?: Kind; onBack: () => void; on
     if (!visible.some((s) => s.id === selected)) setSelected(visible[0]?.id ?? null);
   }, [kind, sources]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  useEffect(() => { if (!cameraId && cams.devices[0]) setCameraId(cams.devices[0].deviceId); }, [cams.devices, cameraId]);
-  useEffect(() => { if (!micId && mics.devices[0]) setMicId(mics.devices[0].deviceId); }, [mics.devices, micId]);
-
   const stopPreviews = () => {
     for (const s of streams.current) for (const t of s.getTracks()) t.stop();
     streams.current = [];
@@ -96,9 +109,10 @@ export function NewRecording(props: { initialKind?: Kind; onBack: () => void; on
 
   // Camera preview (released before recording so the capture backend can open the device).
   useEffect(() => {
-    if (!cameraOn) return;
+    if (!prefsLoaded || !cameraOn) return;
     let stream: MediaStream | null = null;
     let cancelled = false;
+    setCamState('opening');
     void navigator.mediaDevices.getUserMedia({ video: cameraId ? { deviceId: { exact: cameraId }, width: { ideal: 640 } } : { width: { ideal: 640 } } })
       .then((s) => {
         if (cancelled) { s.getTracks().forEach((t) => t.stop()); return; }
@@ -106,58 +120,59 @@ export function NewRecording(props: { initialKind?: Kind; onBack: () => void; on
         streams.current.push(s);
         if (camVideo.current) camVideo.current.srcObject = s;
         void cams.refresh();
+        setCamState('open');
         // The preview runs, so access was granted (perhaps just now, in the system's own dialog).
         setPerms((p) => (p ? { ...p, camera: 'granted' } : p));
       })
-      .catch(() => setPerms((p) => (p ? { ...p, camera: 'denied' } : p)));
+      .catch((e: unknown) => {
+        if (cancelled) return;
+        void cams.refresh();
+        setCamState('failed');
+        const f = openFailure(e);
+        if (f.permission) setPerms((p) => (p ? { ...p, camera: 'denied' } : p));
+      });
     return () => { cancelled = true; stream?.getTracks().forEach((t) => t.stop()); };
-  }, [cameraOn, cameraId]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [prefsLoaded, cameraOn, cameraId, cams.refresh]);
 
-  // Microphone level meter.
+  // Opened exactly as the recording opens it, so the meter shows the level that gets recorded.
   useEffect(() => {
-    if (!micOn) { setLevel(0); return; }
+    if (!prefsLoaded || !micOn) return;
     let stream: MediaStream | null = null;
-    let ctx: AudioContext | null = null;
-    let raf = 0;
     let cancelled = false;
-    void navigator.mediaDevices.getUserMedia({ audio: micId ? { deviceId: { exact: micId } } : true }).then((s) => {
+    setMicState('opening');
+    void navigator.mediaDevices.getUserMedia(micConstraints(micId)).then((s) => {
       if (cancelled) { s.getTracks().forEach((t) => t.stop()); return; }
       stream = s;
       streams.current.push(s);
+      setMicStream(s);
+      setMicState('open');
       void mics.refresh();
       setPerms((p) => (p ? { ...p, microphone: 'granted' } : p));
-      ctx = new AudioContext();
-      const an = ctx.createAnalyser();
-      an.fftSize = 1024;
-      ctx.createMediaStreamSource(s).connect(an);
-      const data = new Float32Array(an.fftSize);
-      const tick = () => {
-        an.getFloatTimeDomainData(data);
-        let sum = 0;
-        for (const v of data) sum += v * v;
-        setLevel(Math.min(1, Math.sqrt(sum / data.length) * 4));
-        raf = requestAnimationFrame(tick);
-      };
-      tick();
-    }).catch(() => setPerms((p) => (p ? { ...p, microphone: 'denied' } : p)));
-    return () => { cancelled = true; cancelAnimationFrame(raf); stream?.getTracks().forEach((t) => t.stop()); void ctx?.close(); };
-  }, [micOn, micId]); // eslint-disable-line react-hooks/exhaustive-deps
+    }).catch((e: unknown) => {
+      if (cancelled) return;
+      void mics.refresh();
+      setMicState('failed');
+      if (openFailure(e).permission) setPerms((p) => (p ? { ...p, microphone: 'denied' } : p));
+    });
+    return () => { cancelled = true; setMicStream(null); stream?.getTracks().forEach((t) => t.stop()); };
+  }, [prefsLoaded, micOn, micId, mics.refresh]);
 
   const native = backends.find((b) => b.id === 'native-macos' || b.id === 'native-windows');
   const effective = backend === 'web' || (backend === 'auto' && !native?.available) ? backends.find((b) => b.id === 'web') : native;
   const systemAudioSupported = !!effective?.capabilities.systemAudio;
   const source = visible.find((s) => s.id === selected);
+  const camProblem = camState === 'opening' ? null : inputProblem({ on: cameraOn, permission: perms?.camera ?? 'unknown', deviceId: cameraId, openFailed: camState === 'failed' });
+  const micProblem = micState === 'opening' ? null : inputProblem({ on: micOn, permission: perms?.microphone ?? 'unknown', deviceId: micId, openFailed: micState === 'failed' });
+  const devicesPending = (cameraOn && camState === 'opening') || (micOn && micState === 'opening');
 
-  const start = async () => {
-    if (!source) return;
-    setError(null);
-    setStarting(true);
+  const config = useMemo((): CaptureConfig | null => {
+    if (!source) return null;
     const cam = cams.devices.find((d) => d.deviceId === cameraId);
     const mic = mics.devices.find((d) => d.deviceId === micId);
     const r = kind === 'region' && region && source.bounds
       ? { x: Math.round(region.x * source.bounds.w), y: Math.round(region.y * source.bounds.h), w: Math.round(region.w * source.bounds.w), h: Math.round(region.h * source.bounds.h) }
       : undefined;
-    const config: CaptureConfig = {
+    return {
       target: { kind, sourceId: source.id, displayId: source.displayId, label: source.name, ...(r ? { region: r } : {}) },
       cameraDeviceId: cameraOn && cam ? cam.deviceId : null,
       cameraLabel: cameraOn && cam ? cam.label : null,
@@ -166,6 +181,23 @@ export function NewRecording(props: { initialKind?: Kind; onBack: () => void; on
       systemAudio: systemAudio && systemAudioSupported,
       fps, quality, countdown, backend,
     };
+  }, [source, cams.devices, mics.devices, cameraId, micId, kind, region, cameraOn, micOn, systemAudio, systemAudioSupported, fps, quality, countdown, backend]);
+
+  const estimateKey = config && JSON.stringify({ ...config, cameraLabel: null, micLabel: null, countdown: 0 });
+  useEffect(() => {
+    if (!estimateKey) return;
+    const estimated = JSON.parse(estimateKey) as CaptureConfig;
+    let live = true;
+    const run = () => void api.diskEstimate(estimated).then((d) => { if (live) setDisk(d); }, () => undefined);
+    run();
+    const timer = window.setInterval(run, 30_000);
+    return () => { live = false; window.clearInterval(timer); };
+  }, [estimateKey]);
+
+  const start = async () => {
+    if (!config) return;
+    setError(null);
+    setStarting(true);
     try {
       props.onStarted();
       await api.startCapture(config);
@@ -173,6 +205,32 @@ export function NewRecording(props: { initialKind?: Kind; onBack: () => void; on
       setError((e as Error).message);
       setStarting(false);
     }
+  };
+
+  const inputNote = (device: 'camera' | 'microphone', problem: InputProblem, turnOff: () => void) => {
+    const text = {
+      camera: {
+        permission: t("Momotombo no tiene permiso para usar la cámara. Permítelo en Ajustes del Sistema o graba sin cámara."),
+        'no-device': t("No se encontró ninguna cámara. Conecta una o graba sin cámara."),
+        unavailable: t("No se pudo abrir la cámara. Puede que otra app la esté usando: ciérrala, elige otra o graba sin cámara."),
+      },
+      microphone: {
+        permission: t("Momotombo no tiene permiso para usar el micrófono. Permítelo en Ajustes del Sistema o graba sin micrófono."),
+        'no-device': t("No se encontró ningún micrófono. Conecta uno o graba sin micrófono."),
+        unavailable: t("No se pudo abrir el micrófono. Puede que otra app lo esté usando: ciérrala, elige otro o graba sin micrófono."),
+      },
+    }[device][problem];
+    return (
+      <div className="note is-error" role="alert"><Icon name="warning" size={14} />
+        <div className="note-body">
+          <span>{text}</span>
+          <div className="note-actions">
+            {problem === 'permission' && <button type="button" className="link" onClick={() => api.openPermissionSettings(device)}>{t("Abrir ajustes")}</button>}
+            <button type="button" className="link" onClick={turnOff}>{device === 'camera' ? t("Grabar sin cámara") : t("Grabar sin micrófono")}</button>
+          </div>
+        </div>
+      </div>
+    );
   };
 
   const permRow = (label: string, key: keyof PermissionInfo, pane: 'screen' | 'camera' | 'microphone' | 'input') => {
@@ -227,26 +285,28 @@ export function NewRecording(props: { initialKind?: Kind; onBack: () => void; on
 
         <aside className="nr-side">
           <div className="nr-card">
-            <header><Icon name="camera" size={16} /><strong>{t("Cámara")}</strong><Toggle label={t("Grabar la cámara")} hideLabel checked={cameraOn} onChange={setCameraOn} /></header>
+            <header><Icon name="camera" size={16} /><strong>{t("Cámara")}</strong><Toggle label={t("Grabar la cámara")} hideLabel checked={cameraOn} onChange={(v) => remember({ cameraOn: v })} /></header>
             {cameraOn && (
               <>
                 <div className="cam-preview"><video ref={camVideo} autoPlay muted playsInline /></div>
-                <Select label={t("Dispositivo")} value={cameraId} onChange={setCameraId} options={cams.devices.map((d) => ({ value: d.deviceId, label: d.label || t("Cámara") }))} />
+                {camProblem && inputNote('camera', camProblem, () => remember({ cameraOn: false }))}
+                {cams.devices.length > 0 && <Select label={t("Dispositivo")} value={cameraId ?? ''} onChange={(id) => remember({ cameraDeviceId: id })} options={cams.devices.map((d) => ({ value: d.deviceId, label: d.label || t("Cámara") }))} />}
                 <p className="muted small">{t("La cámara se graba aparte de la pantalla; su posición y forma se pueden cambiar después.")}</p>
               </>
             )}
           </div>
           <div className="nr-card">
-            <header><Icon name="mic" size={16} /><strong>{t("Micrófono")}</strong><Toggle label={t("Grabar el micrófono")} hideLabel checked={micOn} onChange={setMicOn} /></header>
+            <header><Icon name="mic" size={16} /><strong>{t("Micrófono")}</strong><Toggle label={t("Grabar el micrófono")} hideLabel checked={micOn} onChange={(v) => remember({ micOn: v })} /></header>
             {micOn && (
               <>
-                <Select label={t("Dispositivo")} value={micId} onChange={setMicId} options={mics.devices.map((d) => ({ value: d.deviceId, label: d.label || t("Micrófono") }))} />
-                <div className="meter" aria-label={t("Nivel del micrófono")}><span style={{ width: `${level * 100}%` }} /></div>
+                {micProblem && inputNote('microphone', micProblem, () => remember({ micOn: false }))}
+                {mics.devices.length > 0 && <Select label={t("Dispositivo")} value={micId ?? ''} onChange={(id) => remember({ micDeviceId: id })} options={mics.devices.map((d) => ({ value: d.deviceId, label: d.label || t("Micrófono") }))} />}
+                {micStream && <MicLevel stream={micStream} />}
               </>
             )}
           </div>
           <div className="nr-card">
-            <header><Icon name="speaker" size={16} /><strong>{t("Audio del sistema")}</strong><Toggle label={t("Grabar el audio del sistema")} hideLabel checked={systemAudio && systemAudioSupported} disabled={!systemAudioSupported} onChange={setSystemAudio} /></header>
+            <header><Icon name="speaker" size={16} /><strong>{t("Audio del sistema")}</strong><Toggle label={t("Grabar el audio del sistema")} hideLabel checked={systemAudio && systemAudioSupported} disabled={!systemAudioSupported} onChange={(v) => remember({ systemAudio: v })} /></header>
             {!systemAudioSupported && (
               <p className="muted small">
                 {window.momotombo.platform === 'darwin'
@@ -257,9 +317,10 @@ export function NewRecording(props: { initialKind?: Kind; onBack: () => void; on
           </div>
           <div className="nr-card">
             <header><Icon name="sliders" size={16} /><strong>{t("Calidad")}</strong></header>
-            <Segmented<'30' | '60'> size="sm" label={t("Fotogramas por segundo")} value={String(fps) as '30' | '60'} onChange={(v) => setFps(Number(v) as 30 | 60)} options={[{ value: '30', label: t("30 fps") }, { value: '60', label: t("60 fps") }]} />
-            <Segmented<'standard' | 'high' | 'max'> size="sm" label={t("Calidad")} value={quality} onChange={setQuality} options={[{ value: 'standard', label: t("Estándar") }, { value: 'high', label: t("Alta") }, { value: 'max', label: t("Máxima") }]} />
-            <Segmented<'0' | '3' | '5'> size="sm" label={t("Cuenta regresiva")} value={String(countdown) as '0' | '3' | '5'} onChange={(v) => setCountdown(Number(v))} options={[{ value: '0', label: t("Ninguna") }, { value: '3', label: t("3 s") }, { value: '5', label: t("5 s") }]} />
+            <Segmented<'30' | '60'> size="sm" label={t("Fotogramas por segundo")} value={String(fps) as '30' | '60'} onChange={(v) => remember({ fps: Number(v) as 30 | 60 })} options={[{ value: '30', label: t("30 fps") }, { value: '60', label: t("60 fps") }]} />
+            <Segmented<'standard' | 'high' | 'max'> size="sm" label={t("Calidad")} value={quality} onChange={(v) => remember({ quality: v })} options={[{ value: 'standard', label: t("Estándar") }, { value: 'high', label: t("Alta") }, { value: 'max', label: t("Máxima") }]} />
+            <Segmented<'0' | '3' | '5'> size="sm" label={t("Cuenta regresiva")} value={String(countdown) as '0' | '3' | '5'} onChange={(v) => remember({ countdown: Number(v) as 0 | 3 | 5 })} options={[{ value: '0', label: t("Ninguna") }, { value: '3', label: t("3 s") }, { value: '5', label: t("5 s") }]} />
+            <DiskLine disk={disk} />
           </div>
           <div className="nr-card">
             <header><Icon name="info" size={16} /><strong>{t("Método de grabación")}</strong></header>
@@ -288,7 +349,7 @@ export function NewRecording(props: { initialKind?: Kind; onBack: () => void; on
             </div>
           )}
           {error && <p className="note is-error"><Icon name="warning" size={14} />{error}</p>}
-          <Button variant="record" size="lg" icon="record" wide onClick={start} disabled={!source || starting || (kind === 'region' && !region)}>
+          <Button variant="record" size="lg" icon="record" wide onClick={start} disabled={!config || starting || (kind === 'region' && !region) || !!camProblem || !!micProblem || devicesPending || disk?.level === 'insufficient'}>
             {starting ? t("Preparando la cámara y la grabación…") : t("Iniciar grabación")}
           </Button>
           <p className="muted small center">{t("Durante la grabación:")} <kbd className="kbd">{keyLabel(RECORDING_KEYS.stop)}</kbd> {t("finalizar ·")} <kbd className="kbd">{keyLabel(RECORDING_KEYS.pause)}</kbd> {t("pausar ·")} <kbd className="kbd">{keyLabel(RECORDING_KEYS.mark)}</kbd> {t("marca")}</p>
@@ -296,6 +357,37 @@ export function NewRecording(props: { initialKind?: Kind; onBack: () => void; on
       </div>
     </div>
   );
+}
+
+function MicLevel(props: { stream: MediaStream }) {
+  const source = useMemo(() => streamReadings(props.stream), [props.stream]);
+  const m = useMicMeter(source);
+  return (
+    <>
+      <div className="meter-row">
+        <span className="meter" ref={m.bar} role="meter" aria-label={t("Nivel del micrófono")} aria-valuemin={-60} aria-valuemax={0} aria-valuenow={-60}>
+          <span className="meter-fill" ref={m.fill} />
+          <span className="meter-hold" ref={m.hold} />
+        </span>
+        <span className={`meter-clip${m.clipping ? ' is-on' : ''}`} title={t("Saturación: el sonido llega al máximo y se distorsiona. Aleja el micrófono o baja su volumen.")} aria-hidden="true">{t("SAT")}</span>
+        <span className="sr-only" role="status">{m.clipping ? t("Saturación: el sonido llega al máximo y se distorsiona. Aleja el micrófono o baja su volumen.") : ''}</span>
+      </div>
+      <div className="meter-scale mono" aria-hidden="true"><span>-60</span><span>-40</span><span>-20</span><span>0 dB</span></div>
+      {m.silent && <p className="note is-warning" role="status"><Icon name="warning" size={14} />{t("El micrófono no capta sonido. Revisa que no esté silenciado o elige otro dispositivo.")}</p>}
+    </>
+  );
+}
+
+function recordingTime(minutes: number): string {
+  return minutes >= 120 ? t("unas {n} h", { n: Math.floor(minutes / 60) }) : t("unos {n} min", { n: minutes });
+}
+
+function DiskLine(props: { disk: DiskEstimate | null }) {
+  const d = props.disk;
+  if (!d || d.level === 'unknown' || d.minutesLeft === null) return null;
+  if (d.level === 'insufficient') return <p className="note is-error" role="alert"><Icon name="warning" size={14} />{t("No hay espacio suficiente en disco para grabar con esta calidad. Libera espacio o baja la calidad.")}</p>;
+  if (d.level === 'low') return <p className="note is-warning"><Icon name="warning" size={14} />{t("Queda poco espacio en disco: {time} de grabación con esta calidad.", { time: recordingTime(d.minutesLeft) })}</p>;
+  return <p className="muted small">{t("Espacio en disco para {time} de grabación con esta calidad.", { time: recordingTime(d.minutesLeft) })}</p>;
 }
 
 function RegionPicker(props: { source: SourceInfo; region: Region | null; onChange: (r: Region | null) => void; others: SourceInfo[]; onSelect: (id: string) => void }) {

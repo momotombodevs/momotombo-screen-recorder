@@ -24,6 +24,7 @@ const common = {
 const configs = [
   { ...common, entryPoints: [resolve(app, 'src/main/main.ts')], outfile: resolve(app, 'dist/main/main.cjs') },
   { ...common, entryPoints: [resolve(app, 'src/preload/preload.ts')], outfile: resolve(app, 'dist/main/preload.cjs') },
+  { ...common, entryPoints: [resolve(app, 'src/cli/momotombo-edit.ts')], outfile: resolve(app, 'dist/cli/momotombo-edit.cjs') },
 ];
 
 if (watch) {

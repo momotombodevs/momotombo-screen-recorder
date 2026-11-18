@@ -17,6 +17,7 @@ import {
   type SegmentPlacement,
 } from "./mapping";
 import { sortedByStart, sortedByTime } from "./sorting";
+import { textLayers, type TextLayer } from "./text";
 import type {
   Background,
   CameraLayout,
@@ -105,6 +106,7 @@ export interface RenderPlan {
   cursor: CursorLayer | null;
   magnifier: MagnifierLayer | null;
   privacy: PrivacyLayer[];
+  texts: TextLayer[];
 }
 
 export interface EvaluateOptions {
@@ -809,6 +811,7 @@ export function evaluate(
     cursor: null,
     magnifier: null,
     privacy: [],
+    texts: [],
   };
   const pos = timelineToSource(
     project,
@@ -821,6 +824,7 @@ export function evaluate(
   const s = pos.sourceTime;
   plan.recordingId = rec.id;
   plan.sourceTime = s;
+  plan.texts = textLayers(project, rec.id, s, width, height);
   const cursor = opts.cursors?.[rec.id];
   const styled = resolvedFrameStyle(project, variant);
   // Zero padding means edge to edge: fill the area (cropping a little if the aspect

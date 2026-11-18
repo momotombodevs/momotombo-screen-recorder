@@ -36,6 +36,22 @@ export const CaptureConfig = z.object({
 });
 export type CaptureConfig = z.infer<typeof CaptureConfig>;
 
+/** The recording screen's last choices. */
+export const RecorderPrefs = z.object({
+  cameraOn: z.boolean(),
+  micOn: z.boolean(),
+  systemAudio: z.boolean(),
+  cameraDeviceId: z.string().max(512).nullable(),
+  micDeviceId: z.string().max(512).nullable(),
+  fps: z.union([z.literal(30), z.literal(60)]),
+  quality: z.enum(['standard', 'high', 'max']),
+  countdown: z.union([z.literal(0), z.literal(3), z.literal(5)]),
+});
+export type RecorderPrefs = z.infer<typeof RecorderPrefs>;
+export const DEFAULT_RECORDER_PREFS: RecorderPrefs = {
+  cameraOn: true, micOn: true, systemAudio: true, cameraDeviceId: null, micDeviceId: null, fps: 60, quality: 'high', countdown: 3,
+};
+
 export type CapturePhase = 'idle' | 'preparing' | 'countdown' | 'recording' | 'paused' | 'finishing' | 'error';
 
 export interface CaptureState {
@@ -43,9 +59,16 @@ export interface CaptureState {
   backend: 'native-macos' | 'native-windows' | 'web' | null;
   elapsedMs: number;
   countdown: number;
+  /** The session records a microphone. */
+  hasMic: boolean;
+  /** Linear RMS of the microphone, 0..1. */
   micLevel: number;
+  /** Largest microphone sample since the previous state, 0..1. */
+  micPeak: number;
   droppedFrames: number;
   diskFreeBytes: number | null;
+  /** Recording time the free space still allows at this session's bitrate. */
+  diskMinutesLeft: number | null;
   /** Camera/microphone are open, warmed up and owned by the recorder. */
   devicesReady: boolean;
   message?: string;
@@ -249,6 +272,36 @@ export const ExportWrite = z.object({
   data: z.instanceof(Uint8Array),
 });
 
+/** An export momotombo-edit asked for: validated by main, run by the main window. */
+export interface CliExportJob {
+  requestId: string;
+  opened: OpenedProject;
+  choices: {
+    variantId?: string;
+    format: 'mp4' | 'webm';
+    resolution?: '1080' | '2160';
+    fps?: 30 | 60;
+    quality?: 'standard' | 'high';
+    includeAudio?: boolean;
+  };
+  target: ExportTarget;
+}
+
+export const CliExportReport = z.object({
+  requestId: z.string().regex(/^xr_[0-9a-f]{16}$/),
+  state: z.enum(['running', 'done', 'failed', 'refused']),
+  progress: z.number().min(0).max(1),
+  phase: z.string().max(40).nullable(),
+  outFile: z.string().max(4096).nullable(),
+  bytes: z.number().int().min(0).nullable(),
+  error: z.string().max(4000).nullable(),
+  reason: z.literal('editing-other-project').nullable(),
+});
+export type CliExportReport = z.infer<typeof CliExportReport>;
+
+export const PeaksStamp = z.object({ size: z.number().int().min(0), mtimeMs: z.number().min(0) });
+export type PeaksStamp = z.infer<typeof PeaksStamp>;
+
 export const Schemas = {
   'projects:create': z.object({ name: z.string().min(1).max(200) }),
   'projects:open': z.object({ id: ProjectId }),
@@ -257,8 +310,17 @@ export const Schemas = {
   'projects:trash': z.object({ id: ProjectId }),
   'projects:reveal': z.object({ id: ProjectId }),
   'projects:readText': z.object({ id: ProjectId, path: RelPath }),
+  'projects:readPeaks': z.object({ id: ProjectId, file: RelPath.refine((p) => p.startsWith('media/')) }),
+  'projects:writePeaks': z.object({
+    id: ProjectId,
+    file: RelPath.refine((p) => p.startsWith('media/')),
+    stamp: PeaksStamp,
+    data: z.instanceof(Uint8Array).refine((d) => d.byteLength <= 32 * 1024 * 1024),
+  }),
   'projects:setThumbnail': z.object({ id: ProjectId, dataUrl: z.string().startsWith('data:image/jpeg;base64,').max(2_000_000) }),
   'capture:start': CaptureConfig,
+  'capture:diskEstimate': CaptureConfig,
+  'recorder:setPrefs': RecorderPrefs.partial().strict(),
   'permissions:request': z.object({ kind: z.enum(['camera', 'microphone', 'screen']) }),
   'permissions:openSettings': z.object({ kind: z.enum(['camera', 'microphone', 'screen', 'input']) }),
   'export:defaultTarget': ExportTargetRequest,
@@ -268,6 +330,7 @@ export const Schemas = {
   'export:mfBegin': ExportMfBegin,
   'export:mfWrite': ExportMfWrite,
   'export:write': ExportWrite,
+  'export:cliReport': CliExportReport,
   'export:end': z.object({ exportId: z.string().min(8).max(80), cancel: z.boolean().default(false) }),
   'shell:showItem': z.object({ path: z.string().min(1).max(4096) }),
   'settings:set': z.object({ language: z.enum(['auto', 'es', 'en']) }),
@@ -297,6 +360,6 @@ export const CaptureWorker = {
   started: z.object({ startedAtMs: z.number(), kinds: z.array(z.enum(['screen', 'camera', 'mic', 'system'])) }),
   ready: z.object({ cameraWarmupMs: z.number().min(0).max(60_000).nullable() }),
   busy: z.object({ device: z.enum(['camera', 'mic']) }),
-  level: z.object({ mic: z.number().min(0).max(1) }),
+  level: z.object({ mic: z.number().min(0).max(1), peak: z.number().min(0).max(1) }),
   failed: z.object({ message: z.string().max(2000) }),
 };

@@ -1,0 +1,22 @@
+[Parsed_silencedetect_2 @ 0x77b106ca80] silence_start: 0
+[Parsed_silencedetect_2 @ 0x77b106ca80] silence_end: 6.917396 | silence_duration: 6.917396
+[Parsed_silencedetect_2 @ 0x77b106ca80] silence_start: 6.925583
+[Parsed_silencedetect_2 @ 0x77b106ca80] silence_end: 9.155687 | silence_duration: 2.230104
+[Parsed_silencedetect_2 @ 0x77b106ca80] silence_start: 9.155729
+[Parsed_ebur128_0 @ 0x77b106c900] Summary:
+  Integrated loudness:
+    I:         -53.9 LUFS
+    Threshold: -63.9 LUFS
+  Loudness range:
+    LRA:         1.6 LU
+    Threshold: -73.8 LUFS
+    LRA low:   -54.7 LUFS
+    LRA high:  -53.1 LUFS
+  True peak:
+    Peak:      -33.3 dBFS
+[Parsed_silencedetect_2 @ 0x77b106ca80] silence_end: 19.467646 | silence_duration: 10.311917
+[Parsed_astats_1 @ 0x77b106c9c0] Overall
+[Parsed_astats_1 @ 0x77b106c9c0] Peak level dB: -33.295486
+[Parsed_astats_1 @ 0x77b106c9c0] Peak count: 2.000000
+[Parsed_astats_1 @ 0x77b106c9c0] Noise floor dB: -50.797825
+[Parsed_astats_1 @ 0x77b106c9c0] Number of samples: 934447

@@ -63,7 +63,7 @@ let hud: BrowserWindow | null = null;
 
 /** Floating recording controls. Excluded from capture where the OS allows it. */
 export function showHud(displayBounds: Rect): BrowserWindow {
-  const width = 452;
+  const width = 660;
   const height = 64;
   const x = Math.round(displayBounds.x + (displayBounds.w - width) / 2);
   const y = Math.round(displayBounds.y + (process.platform === 'darwin' ? 44 : 16));

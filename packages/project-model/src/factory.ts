@@ -1,9 +1,9 @@
 import { FPS_30, secondsToTicks } from '@momotombo/timing';
 import { presetTransition } from './easing';
 import type {
-  Background, CameraLayout, ID, MagnifierStyle, Project, Recording, Segment, Style, Variant,
+  AudioChannel, AudioMix, Background, CameraLayout, ID, ItemBase, MagnifierStyle, PrivacyItem, Project, Recording, Segment, Style, TextItem, Variant,
 } from './types';
-import { SCHEMA_VERSION } from './types';
+import { MAX_AUDIO_GAIN, SCHEMA_VERSION } from './types';
 
 export function newId(prefix = ''): ID {
   const uuid = globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
@@ -50,6 +50,31 @@ export const MAGNIFIER_LIMITS = {
 
 export function defaultMagnifier(): MagnifierStyle {
   return { size: 280, zoom: 2, shape: 'circle', border: { width: 3, color: '#FFFFFF' }, hideWhenIdle: false };
+}
+
+/** Allowed ranges of the audio settings; the editor's sliders, playback, export and the CLI all use them. */
+export const AUDIO_LIMITS = {
+  gain: { min: 0, max: MAX_AUDIO_GAIN },
+  highpassHz: { min: 0, max: 1000 },
+  compressor: { thresholdDb: { min: -60, max: 0 }, ratio: { min: 1, max: 20 } },
+  gate: { thresholdDb: { min: -100, max: 0 } },
+  normalize: { targetLufs: { min: -40, max: -5 }, maxBoostDb: 20 },
+} as const;
+
+function plainChannel(gain: number): AudioChannel {
+  return {
+    gain,
+    muted: false,
+    highpassHz: 0,
+    compressor: { enabled: false, thresholdDb: -24, ratio: 3 },
+    gate: { enabled: false, thresholdDb: -50 },
+    normalize: { enabled: false, targetLufs: -16 },
+  };
+}
+
+/** Every enhancement off: the mix sounds exactly as files from before enhancement existed. */
+export function defaultAudio(): AudioMix {
+  return { mic: plainChannel(1), system: plainChannel(0.8) };
 }
 
 export function defaultStyle(): Style {
@@ -105,10 +130,11 @@ export function createProject(name: string, now = new Date()): Project {
     cameraLayouts: [],
     privacy: [],
     magnifiers: [],
+    texts: [],
     style: defaultStyle(),
     variants: defaultVariants(),
     activeVariantId: 'v_16x9',
-    audio: { mic: { gain: 1, muted: false }, system: { gain: 0.8, muted: false } },
+    audio: defaultAudio(),
     zoomEngine: { sensitivity: 'medium' },
   };
 }
@@ -134,4 +160,54 @@ export function addRecording(project: Project, recording: Recording): Project {
 }
 
 export const DEFAULT_PRIVACY_DURATION = secondsToTicks(3);
+
+export function defaultPrivacyLook(): Pick<PrivacyItem, 'keyframes' | 'effect' | 'cornerRadius' | 'padFrames'> {
+  return { keyframes: [], effect: { kind: 'frosted' }, cornerRadius: 0.12, padFrames: 2 };
+}
 export const DEFAULT_MAGNIFIER_DURATION = secondsToTicks(3);
+
+/** Allowed ranges of the text settings; validation, the CLI and the sliders share them. */
+export const TEXT_LIMITS = {
+  length: 500,
+  fontSize: { min: 0.01, max: 0.3 },
+  maxWidth: { min: 0.1, max: 1 },
+  padding: { min: 0, max: 2 },
+  radius: { min: 0, max: 2 },
+  stroke: { min: 0, max: 0.3 },
+  blur: { min: 0, max: 1 },
+  offsetY: { min: -0.5, max: 0.5 },
+  animation: { min: 0, max: secondsToTicks(5) },
+} as const;
+
+export type TextLook = Omit<TextItem, keyof ItemBase | 'type' | 'text'>;
+export const TEXT_PRESET_IDS = ['title', 'lower-third', 'caption', 'callout', 'chapter'] as const;
+export type TextPresetId = (typeof TEXT_PRESET_IDS)[number];
+
+const anim = (kind: TextItem['enter']['kind'], seconds: number) => ({ kind, duration: secondsToTicks(seconds) });
+const SOFT_SHADOW = { color: '#000000', opacity: 0.45, blur: 0.25, offsetY: 0.05 };
+
+/** Looks shared by the editor's preset picker and the CLI's addText. */
+export const TEXT_PRESETS: Record<TextPresetId, TextLook> = {
+  title: {
+    position: { x: 0.5, y: 0.5 }, anchor: 'center', align: 'center', fontSize: 0.09, fontWeight: 800, color: '#FFFFFF', maxWidth: 0.8,
+    shadow: SOFT_SHADOW, enter: anim('pop', 0.5), exit: anim('fade', 0.4),
+  },
+  'lower-third': {
+    position: { x: 0.06, y: 0.88 }, anchor: 'bottom-left', align: 'left', fontSize: 0.045, fontWeight: 600, color: '#FFFFFF', maxWidth: 0.6,
+    background: { color: '#C2410C', opacity: 0.95, padding: 0.55, radius: 0.3 }, enter: anim('slide-right', 0.45), exit: anim('fade', 0.3),
+  },
+  caption: {
+    position: { x: 0.5, y: 0.93 }, anchor: 'bottom', align: 'center', fontSize: 0.042, fontWeight: 500, color: '#FFFFFF', maxWidth: 0.84,
+    background: { color: '#000000', opacity: 0.6, padding: 0.35, radius: 0.2 }, enter: anim('fade', 0.2), exit: anim('fade', 0.2),
+  },
+  callout: {
+    position: { x: 0.5, y: 0.18 }, anchor: 'center', align: 'center', fontSize: 0.05, fontWeight: 700, color: '#16171B', maxWidth: 0.5,
+    background: { color: '#FFD44D', opacity: 1, padding: 0.5, radius: 0.35 }, enter: anim('pop', 0.35), exit: anim('pop', 0.25),
+  },
+  chapter: {
+    position: { x: 0.08, y: 0.12 }, anchor: 'top-left', align: 'left', fontSize: 0.07, fontWeight: 800, color: '#FFFFFF', maxWidth: 0.7,
+    shadow: SOFT_SHADOW, enter: anim('typewriter', 0.9), exit: anim('slide-up', 0.4),
+  },
+};
+
+export const DEFAULT_TEXT_DURATION = secondsToTicks(3);

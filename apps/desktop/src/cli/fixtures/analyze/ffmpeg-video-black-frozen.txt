@@ -1,0 +1,16 @@
+[Parsed_metadata_4 @ 0x786f45a280] frame:0    pts:0       pts_time:0
+[Parsed_metadata_4 @ 0x786f45a280] lavfi.signalstats.YAVG=16
+[Parsed_blackdetect_0 @ 0x786f459ec0] black_start:0 black_end:1 black_duration:1
+[Parsed_metadata_4 @ 0x786f45a280] frame:1    pts:1       pts_time:1
+[Parsed_metadata_4 @ 0x786f45a280] lavfi.signalstats.YAVG=126
+[Parsed_metadata_4 @ 0x786f45a280] frame:2    pts:2       pts_time:2
+[Parsed_metadata_4 @ 0x786f45a280] lavfi.signalstats.YAVG=126
+[Parsed_freezedetect_1 @ 0x786f459f80] lavfi.freezedetect.freeze_start: 1
+[Parsed_metadata_4 @ 0x786f45a280] frame:3    pts:3       pts_time:3
+[Parsed_metadata_4 @ 0x786f45a280] lavfi.signalstats.YAVG=126
+[Parsed_freezedetect_1 @ 0x786f459f80] lavfi.freezedetect.freeze_duration: 3
+[Parsed_freezedetect_1 @ 0x786f459f80] lavfi.freezedetect.freeze_end: 4
+[Parsed_metadata_4 @ 0x786f45a280] frame:4    pts:4       pts_time:4
+[Parsed_metadata_4 @ 0x786f45a280] lavfi.signalstats.YAVG=125.299
+[Parsed_metadata_4 @ 0x786f45a280] frame:5    pts:5       pts_time:5
+[Parsed_metadata_4 @ 0x786f45a280] lavfi.signalstats.YAVG=122.794

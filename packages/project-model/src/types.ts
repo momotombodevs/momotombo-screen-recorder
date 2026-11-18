@@ -214,6 +214,62 @@ export interface MagnifierStyle {
   hideWhenIdle: boolean;
 }
 
+export const TEXT_ANIMATION_KINDS = ['none', 'fade', 'slide-up', 'slide-down', 'slide-left', 'slide-right', 'pop', 'typewriter'] as const;
+export type TextAnimationKind = (typeof TEXT_ANIMATION_KINDS)[number];
+
+/** `slide-up` moves the text upward: it rises into place on enter and leaves upward on exit. */
+export interface TextAnimation {
+  kind: TextAnimationKind;
+  duration: Ticks;
+}
+
+export const TEXT_ANCHORS = ['top-left', 'top', 'top-right', 'left', 'center', 'right', 'bottom-left', 'bottom', 'bottom-right'] as const;
+export type TextAnchor = (typeof TEXT_ANCHORS)[number];
+export const TEXT_ALIGNS = ['left', 'center', 'right'] as const;
+export type TextAlign = (typeof TEXT_ALIGNS)[number];
+export const TEXT_WEIGHTS = [400, 500, 600, 700, 800] as const;
+export type TextWeight = (typeof TEXT_WEIGHTS)[number];
+
+/** padding, radius, width, blur and offsetY are in em: fractions of the item's font size. */
+export interface TextBackground {
+  color: Hex;
+  opacity: number;
+  padding: number;
+  radius: number;
+}
+
+export interface TextStroke {
+  color: Hex;
+  width: number;
+}
+
+export interface TextShadow {
+  color: Hex;
+  opacity: number;
+  blur: number;
+  offsetY: number;
+}
+
+export interface TextItem extends ItemBase {
+  type: 'text';
+  text: string;
+  /** Point the box is anchored at, as fractions of the canvas. */
+  position: Vec2;
+  anchor: TextAnchor;
+  align: TextAlign;
+  /** Font size as a fraction of the canvas's shorter side. */
+  fontSize: number;
+  fontWeight: TextWeight;
+  color: Hex;
+  /** Longest line before wrapping, as a fraction of the canvas width. */
+  maxWidth: number;
+  background?: TextBackground;
+  stroke?: TextStroke;
+  shadow?: TextShadow;
+  enter: TextAnimation;
+  exit: TextAnimation;
+}
+
 export interface Style {
   background: Background;
   frame: FrameStyle;
@@ -237,9 +293,22 @@ export interface Variant {
   zoomStrength?: number;
 }
 
+export interface AudioChannel {
+  gain: number;
+  muted: boolean;
+  /** Cutoff of a 12 dB/octave high-pass filter; 0 is off. */
+  highpassHz: number;
+  compressor: { enabled: boolean; thresholdDb: number; ratio: number };
+  gate: { enabled: boolean; thresholdDb: number };
+  /** Brings the channel's integrated loudness (ITU-R BS.1770, after filter, gate and compressor, before gain) to targetLufs. */
+  normalize: { enabled: boolean; targetLufs: number };
+}
+
+export const MAX_AUDIO_GAIN = 3;
+
 export interface AudioMix {
-  mic: { gain: number; muted: boolean };
-  system: { gain: number; muted: boolean };
+  mic: AudioChannel;
+  system: AudioChannel;
 }
 
 export type ZoomSensitivity = 'low' | 'medium' | 'high';
@@ -256,6 +325,7 @@ export interface Project {
   cameraLayouts: CameraLayoutItem[];
   privacy: PrivacyItem[];
   magnifiers: MagnifierItem[];
+  texts: TextItem[];
   style: Style;
   variants: Variant[];
   activeVariantId: ID;

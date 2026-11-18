@@ -1,8 +1,8 @@
 import { secondsToTicks, type Ticks } from '@momotombo/timing';
-import { addCameraLayout, addMagnifier, addPrivacy, addZoom, type NewCameraLayout, type NewMagnifier, type NewPrivacy, type NewZoom } from './commands';
+import { addCameraLayout, addMagnifier, addPrivacy, addText, addZoom, type NewCameraLayout, type NewMagnifier, type NewPrivacy, type NewText, type NewZoom } from './commands';
 import type { Rect } from './geometry';
 import { layoutSegments, timelineToSource } from './mapping';
-import type { CameraLayoutItem, ID, MagnifierItem, PrivacyItem, Project, ZoomItem } from './types';
+import type { CameraLayoutItem, ID, MagnifierItem, PrivacyItem, Project, TextItem, ZoomItem } from './types';
 
 /**
  * Placement rules for timeline items:
@@ -10,10 +10,13 @@ import type { CameraLayoutItem, ID, MagnifierItem, PrivacyItem, Project, ZoomIte
  *  - camera layout changes never overlap each other;
  *  - magnifier ranges never overlap each other (one lens at a time);
  *  - privacy areas may run at the same time only when they cover different parts of the
- *    screen; two areas over the same place at the same time are not allowed.
+ *    screen; two areas over the same place at the same time are not allowed;
+ *  - texts never block each other: a title over a caption, or two labels stacked on purpose,
+ *    are normal, and how much two texts collide depends on their drawn size, which only the
+ *    compositor knows. Later-starting texts are drawn on top.
  */
-export type TrackKey = 'zooms' | 'cameraLayouts' | 'privacy' | 'magnifiers';
-export type TrackItem = ZoomItem | CameraLayoutItem | PrivacyItem | MagnifierItem;
+export type TrackKey = 'zooms' | 'cameraLayouts' | 'privacy' | 'magnifiers' | 'texts';
+export type TrackItem = ZoomItem | CameraLayoutItem | PrivacyItem | MagnifierItem | TextItem;
 
 export const MIN_ITEM: Ticks = secondsToTicks(0.2);
 
@@ -43,7 +46,7 @@ export function rectsIntersect(a: Rect, b: Rect): boolean {
 
 /** Whether `other` may not share time with `item` on this track. */
 function blocks(key: TrackKey, item: TrackItem, other: TrackItem): boolean {
-  if (item.recordingId !== other.recordingId || item.id === other.id) return false;
+  if (item.recordingId !== other.recordingId || item.id === other.id || key === 'texts') return false;
   if (key !== 'privacy') return true;
   return rectsIntersect(privacyBounds(item as PrivacyItem), privacyBounds(other as PrivacyItem));
 }
@@ -79,7 +82,7 @@ export type PlaceResult =
   | { ok: true; project: Project; id: ID; replacedSuggestions: number; trimmed: boolean }
   | { ok: false; conflict: TrackItem };
 
-type NewByKey = { zooms: NewZoom; cameraLayouts: NewCameraLayout; privacy: NewPrivacy; magnifiers: NewMagnifier };
+export type NewByKey = { zooms: NewZoom; cameraLayouts: NewCameraLayout; privacy: NewPrivacy; magnifiers: NewMagnifier; texts: NewText };
 
 /**
  * Adds an item if the rules allow it. A manual zoom placed over automatic suggestions
@@ -88,7 +91,7 @@ type NewByKey = { zooms: NewZoom; cameraLayouts: NewCameraLayout; privacy: NewPr
  */
 export function placeItem<K extends TrackKey>(p: Project, key: K, input: NewByKey[K]): PlaceResult {
   const item = { ...input };
-  const TYPE: Record<TrackKey, TrackItem['type']> = { zooms: 'zoom', privacy: 'privacy', cameraLayouts: 'camera', magnifiers: 'magnifier' };
+  const TYPE: Record<TrackKey, TrackItem['type']> = { zooms: 'zoom', privacy: 'privacy', cameraLayouts: 'camera', magnifiers: 'magnifier', texts: 'text' };
   const probe = { ...item, id: '__new__', type: TYPE[key] } as TrackItem;
   let project = p;
   let replaced = 0;
@@ -111,7 +114,8 @@ export function placeItem<K extends TrackKey>(p: Project, key: K, input: NewByKe
   const add = key === 'zooms' ? addZoom(project, item as NewZoom)
     : key === 'privacy' ? addPrivacy(project, item as NewPrivacy)
       : key === 'magnifiers' ? addMagnifier(project, item as NewMagnifier)
-        : addCameraLayout(project, item as NewCameraLayout);
+        : key === 'texts' ? addText(project, item as NewText)
+          : addCameraLayout(project, item as NewCameraLayout);
   return { ok: true, project: add.project, id: add.id, replacedSuggestions: replaced, trimmed };
 }
 
@@ -172,7 +176,7 @@ export function laneRange(
   let lo = seg.sourceStart;
   let hi = seg.sourceEnd;
   for (const o of trackItems(p, key)) {
-    if (o.recordingId !== pos.recordingId) continue;
+    if (o.recordingId !== pos.recordingId || key === 'texts') continue;
     if (key === 'zooms' && o.origin === 'auto') continue;
     if (key === 'privacy' && (!region || !rectsIntersect(region, privacyBounds(o as PrivacyItem)))) continue;
     if (o.start <= s0 && s0 < o.end) return null;

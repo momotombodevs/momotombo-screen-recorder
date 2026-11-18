@@ -2,6 +2,9 @@ import { layoutSegments, sequenceDuration, timelineToSource, type ID, type Proje
 import { TICKS_PER_SECOND, type Ticks } from '@momotombo/timing';
 import type { EditorStore } from '../state/editor-store';
 import { probe } from '../perf-probe';
+import { PreviewAudio } from '../audio/preview-audio';
+import { LoudnessTracker, type Loudness } from '../audio/measure';
+import type { DecodedAudio } from '../export/audio-mix';
 
 export interface RecordingMedia {
   screen?: HTMLVideoElement;
@@ -36,6 +39,12 @@ export function mediaTime(rec: Recording, kind: SourceKind, sourceTime: Ticks): 
 
 /** An element that is playing and has data for the moment after the current one. */
 const isSound = (kind: SourceKind) => kind === 'mic' || kind === 'system';
+
+export interface PreviewAudioInfo {
+  mic: Loudness;
+  system: Loudness;
+  enhancementUnavailable: boolean;
+}
 /**
  * Where an element should be for media time `want`. Tracks differ slightly in length and the
  * timeline may run past the end of a file; asking for a time past the end makes the element
@@ -78,15 +87,24 @@ export class Player {
   /**
    * Set while playback is being (re)started at a point (start, resume, a cut): first the elements
    * are positioned; then the leading element is started alone (`started`) and the clock waits
-   * until its time moves. Sound output takes ~100 ms to start; a picture started together with
-   * it would run that much ahead of the sound and the clock.
+   * until its time moves. Sound played by the element itself takes ~100 ms to start; a picture
+   * started together with it would run that much ahead of the sound and the clock. Sound routed
+   * through Web Audio starts at once, so then everything starts together.
    */
-  private cueing: { since: number; until: number; started?: { el: HTMLMediaElement; want: number; picture: boolean } } | null = null;
+  private cueing: { since: number; until: number; started?: { kind: SourceKind; el: HTMLMediaElement; want: number; startsAtOnce: boolean } } | null = null;
   private lastSeek = new WeakMap<HTMLMediaElement, number>();
   /** Timeline time shown on the last step. */
   private shown: Ticks = 0;
+  private readonly audio = new PreviewAudio(() => this.applyAudio());
+  private readonly tracker: LoudnessTracker;
+  readonly decodeCache = new Map<string, Promise<DecodedAudio>>();
+  private audioInfoSnapshot: PreviewAudioInfo = { mic: { state: 'off' }, system: { state: 'off' }, enhancementUnavailable: false };
+  private audioListeners = new Set<() => void>();
+  private starting = false;
 
   constructor(private readonly store: EditorStore) {
+    this.tracker = new LoudnessTracker(store.getState().mediaBase, undefined, this.decodeCache);
+    this.tracker.subscribe(() => this.applyAudio());
     this.sync(store.project);
     this.unsub = store.subscribe(() => {
       const s = store.getState();
@@ -115,6 +133,8 @@ export class Player {
     const base = this.store.getState().mediaBase;
     for (const [id, m] of this.media) {
       if (project.recordings[id]) continue;
+      if (m.mic) this.audio.release(m.mic);
+      if (m.system) this.audio.release(m.system);
       releaseMedia(m);
       this.media.delete(id);
     }
@@ -139,16 +159,44 @@ export class Player {
           // The playhead may have been set before the file's metadata arrived.
           el.addEventListener('loadedmetadata', () => { if (!this.store.getState().playing) this.positionPaused(this.store.getState().playhead); });
           m[kind] = el;
+          if (kind === 'mic' || kind === 'system') this.audio.attach(el, kind);
         }
       }
-      if (m.mic) {
-        m.mic.volume = Math.min(1, project.audio.mic.gain);
-        m.mic.muted = project.audio.mic.muted;
-      }
-      if (m.system) {
-        m.system.volume = Math.min(1, project.audio.system.gain);
-        m.system.muted = project.audio.system.muted;
-      }
+    }
+    this.tracker.update(project);
+    this.applyAudio();
+  }
+
+  audioInfo = (): PreviewAudioInfo => this.audioInfoSnapshot;
+
+  onAudioInfo = (fn: () => void): (() => void) => {
+    this.audioListeners.add(fn);
+    return () => this.audioListeners.delete(fn);
+  };
+
+  private applyAudio(): void {
+    const project = this.store.project;
+    this.audio.update(project.audio, this.soundElements(), (k) => this.tracker.lufs(project, k));
+    const next: PreviewAudioInfo = {
+      mic: this.tracker.get(project, 'mic'),
+      system: this.tracker.get(project, 'system'),
+      enhancementUnavailable: this.audio.enhancementUnavailable,
+    };
+    const prev = this.audioInfoSnapshot;
+    if (JSON.stringify(prev) === JSON.stringify(next)) return;
+    this.audioInfoSnapshot = next;
+    for (const fn of this.audioListeners) fn();
+  }
+
+  /** Media time of an element as heard: sound routed through Web Audio comes out a little later. */
+  private heard(kind: SourceKind, el: HTMLMediaElement): number {
+    return el.currentTime - (isSound(kind) ? this.audio.latency(el) : 0);
+  }
+
+  private *soundElements(): Generator<[HTMLMediaElement, 'mic' | 'system']> {
+    for (const m of this.media.values()) {
+      if (m.mic) yield [m.mic, 'mic'];
+      if (m.system) yield [m.system, 'system'];
     }
   }
 
@@ -227,15 +275,16 @@ export class Player {
       if (!ready && now < cue.until) return false;
       const master = MASTER_ORDER.map((k) => live.find((i) => i.kind === k)).find((i) => !!i);
       if (!master) return true;
-      cue.started = { el: master.el, want: master.want, picture: !isSound(master.kind) };
+      const startsAtOnce = !isSound(master.kind) || this.audio.routed(master.el);
+      cue.started = { kind: master.kind, el: master.el, want: master.want, startsAtOnce };
       cue.until = now + START_TIMEOUT;
       play(master.el);
-      if (!cue.started.picture) return false;
+      if (!cue.started.startsAtOnce) return false;
     }
     const st = cue.started;
-    if (!st.picture) {
+    if (!st.startsAtOnce) {
       // The sound's time moves steadily only once it is really coming out.
-      const moved = st.el.currentTime - st.want;
+      const moved = this.heard(st.kind, st.el) - st.want;
       if (moved < START_MOVE && !st.el.ended && now < cue.until) return false;
       this.clockOrigin = t + Math.max(0, Math.min(0.2, moved)) * TICKS_PER_SECOND;
       this.clockStart = now;
@@ -275,7 +324,7 @@ export class Player {
       return this.shown;
     }
     // Follow the leading element: its own time is the truth, the clock only smooths it.
-    const lead = master.el.currentTime - master.want; // s; > 0 when the element is ahead of the clock
+    const lead = this.heard(master.kind, master.el) - master.want; // s; > 0 when the element is ahead of the clock
     if (Math.abs(lead) > HARD_DRIFT) this.clockOrigin += lead * TICKS_PER_SECOND;
     else if (Math.abs(lead) > 0.004) this.clockOrigin += lead * TICKS_PER_SECOND * 0.06;
     t = this.clockOrigin + ((now - this.clockStart) / 1000) * TICKS_PER_SECOND;
@@ -285,9 +334,9 @@ export class Player {
       const { el } = i;
       if (el.paused) void el.play().catch(() => undefined);
       if (el.seeking || el.readyState < 2) continue;
-      const off = el.currentTime - i.want; // s; > 0 when this element is ahead
+      const off = this.heard(i.kind, el) - i.want; // s; > 0 when this element is ahead
       if (Math.abs(off) > HARD_DRIFT) {
-        if (now - (this.lastSeek.get(el) ?? 0) > RESEEK_EVERY) this.seek(el, i.want, now);
+        if (now - (this.lastSeek.get(el) ?? 0) > RESEEK_EVERY) this.seek(el, i.want + (el.currentTime - this.heard(i.kind, el)), now);
         continue;
       }
       // Pictures are pulled back with a small speed change; sound keeps its speed (a speed
@@ -301,6 +350,18 @@ export class Player {
   }
 
   play(): void {
+    if (this.starting) return;
+    const resumed = this.audio.resume();
+    if (!resumed) return this.start();
+    this.starting = true;
+    const run = this.run;
+    void resumed.then(() => {
+      this.starting = false;
+      if (run === this.run) this.start();
+    });
+  }
+
+  private start(): void {
     const s = this.store.getState();
     const duration = sequenceDuration(s.project);
     if (duration <= 0 || s.playing) return;
@@ -349,6 +410,9 @@ export class Player {
     this.unsub();
     for (const m of this.media.values()) releaseMedia(m);
     this.media.clear();
+    this.audio.dispose();
+    this.tracker.dispose();
+    this.audioListeners.clear();
   }
 }
 

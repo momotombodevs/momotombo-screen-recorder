@@ -195,7 +195,7 @@ final class RecordingSession {
 
     private func sendStatus() {
         let dropped = writers.reduce(0) { $0 + $1.dropped }
-        Output.send(["type": "status", "elapsedMs": clock.elapsed() * 1000, "micLevel": Double(mic?.level ?? 0), "dropped": dropped])
+        Output.send(["type": "status", "elapsedMs": clock.elapsed() * 1000, "micLevel": Double(mic?.level ?? 0), "micPeak": Double(mic?.takePeak() ?? 0), "dropped": dropped])
     }
 
     func pause() {

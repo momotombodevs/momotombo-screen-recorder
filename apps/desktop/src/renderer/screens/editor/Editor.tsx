@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  DEFAULT_CAMERA_MOVE, activeVariant, laneRange, layoutSegments, removeCameraLayout, removeMagnifier, removePrivacy, removeSegment,
-  removeZoom, renameProject, resolveOverlaps, sequenceDuration, setActiveVariant, splitAt, timelineToSource,
+  DEFAULT_CAMERA_MOVE, activeVariant, laneRange, layoutSegments, parseProject, removeCameraLayout, removeMagnifier, removePrivacy, removeSegment,
+  removeText, removeZoom, renameProject, resolveOverlaps, sequenceDuration, setActiveVariant, splitAt, timelineToSource,
 } from '@momotombo/project-model';
 import type { OpenedProject } from '@momotombo/protocol';
 import { formatTimecode, frameDuration, secondsToTicks } from '@momotombo/timing';
@@ -16,17 +16,15 @@ import { Settings } from '../Settings';
 import { shortcutsBlocked } from './editor-guards';
 import { ExportDialog } from './ExportDialog';
 import { Inspector } from './Inspector';
-import { addMagnifierAt, place, placeRange } from './placement';
+import { adjacentMarker, isTypingTarget, markerShortcut, markerTimes } from './markers';
+import { addMagnifierAt, addTextAt, place, placeRange } from './placement';
 import { Preview } from './Preview';
 import { Timeline } from './Timeline';
 import { noSuggestionMessage, runZoomSuggestions } from './zoom-actions';
 import { t } from '../../i18n';
 import { probe } from '../../perf-probe';
 
-function isTyping(e: KeyboardEvent): boolean {
-  const t = e.target as HTMLElement | null;
-  return !!t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable);
-}
+const isTyping = (e: KeyboardEvent) => isTypingTarget(e.target as HTMLElement | null);
 
 export function Editor({ opened, onBack, notice: initialNotice, onNoticeShown }: {
   opened: OpenedProject; onBack: () => void;
@@ -93,6 +91,12 @@ export function Editor({ opened, onBack, notice: initialNotice, onNoticeShown }:
     onNoticeShown?.();
   }, [store]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  useEffect(() => api.onProjectChanged(({ id, json }) => {
+    if (id !== store.project.id) return;
+    store.apply(() => parseProject(json));
+    store.notify(t("El proyecto cambió fuera del editor. Pulsa {key} para deshacer.", { key: keyLabel('mod+Z') }));
+  }), [store]);
+
   const leave = async () => { if (await store.requestLeave()) onBack(); };
   // Playback would overwrite the new position on its next frame.
   const seek = (t: number) => {
@@ -115,6 +119,14 @@ export function Editor({ opened, onBack, notice: initialNotice, onNoticeShown }:
       if (shortcutsBlocked(s)) return;
       if (mod && e.key === ',') { e.preventDefault(); setSettingsOpen(true); return; }
       const fd = frameDuration(s.project.sequence.fps);
+      const markerStep = markerShortcut(e, null);
+      if (markerStep) {
+        e.preventDefault();
+        const to = adjacentMarker(markerTimes(s.project.recordings, layoutSegments(s.project)), s.playhead, markerStep, fd / 2);
+        if (to === null) store.notify(t("No hay más marcas en esa dirección."));
+        else seekRef.current(to);
+        return;
+      }
       if (mod && e.key.toLowerCase() === 'z') {
         e.preventDefault();
         if (e.shiftKey) store.redo(); else store.undo();
@@ -135,6 +147,7 @@ export function Editor({ opened, onBack, notice: initialNotice, onNoticeShown }:
         case 'z': case 'Z': store.setTool(s.tool === 'zoom' ? 'select' : 'zoom'); break;
         case 'b': case 'B': store.setTool(s.tool === 'privacy' ? 'select' : 'privacy'); break;
         case 'm': case 'M': store.setTool(s.tool === 'magnifier' ? 'select' : 'magnifier'); break;
+        case 't': case 'T': store.setTool(s.tool === 'text' ? 'select' : 'text'); break;
         case 'v': case 'V': case 'Escape': store.setTool('select'); if (e.key === 'Escape') store.select(null); break;
         case '?': setHelp((h) => !h); break;
         case 'Delete': case 'Backspace': {
@@ -145,6 +158,7 @@ export function Editor({ opened, onBack, notice: initialNotice, onNoticeShown }:
           if (sel.kind === 'privacy') store.apply((p) => removePrivacy(p, sel.id));
           if (sel.kind === 'camera') store.apply((p) => removeCameraLayout(p, sel.id));
           if (sel.kind === 'magnifier') store.apply((p) => removeMagnifier(p, sel.id));
+          if (sel.kind === 'text') store.apply((p) => removeText(p, sel.id));
           if (sel.kind === 'segment' && s.project.sequence.segments.length > 1) store.apply((p) => removeSegment(p, sel.id));
           break;
         }
@@ -241,6 +255,7 @@ export function Editor({ opened, onBack, notice: initialNotice, onNoticeShown }:
                 { value: 'select', label: t("Seleccionar"), icon: 'cursor' },
                 { value: 'zoom', label: t("Zoom"), icon: 'zoom' },
                 { value: 'magnifier', label: t("Lupa"), icon: 'magnifier' },
+                { value: 'text', label: t("Texto"), icon: 'text' },
                 { value: 'camera', label: t("Cámara dinámica"), icon: 'camera' },
                 { value: 'privacy', label: t("Ocultar"), icon: 'privacy' },
                 { value: 'cut', label: t("Cortar"), icon: 'scissors' },
@@ -253,6 +268,7 @@ export function Editor({ opened, onBack, notice: initialNotice, onNoticeShown }:
                 ? t("Elige la posición 2: haz clic en la vista previa donde debe ir la cámara.")
                 : t("Arrastra los marcos 1 y 2 para cambiar las posiciones. La línea en la línea de tiempo es el momento en que la cámara pasa a la posición 2.")}</span>}
             {tool === 'magnifier' && <span className="tool-hint">{t("Pulsa un momento en la línea de tiempo o en la vista previa: se añade un intervalo de lupa de 3 s. Arrastra para dibujar uno más largo.")}</span>}
+            {tool === 'text' && <span className="tool-hint">{t("Pulsa en la vista previa donde quieres el texto, o un momento en la línea de tiempo: se añade un texto de 3 s. Arrastra el texto en la vista previa para moverlo.")}</span>}
             {tool === 'cut' && <span className="tool-hint">{t("Haz clic donde quieras cortar en la línea de tiempo · Seleccionar o Esc para terminar")}</span>}
           </div>
           {help && <ShortcutHelp onClose={() => setHelp(false)} />}
@@ -265,6 +281,7 @@ export function Editor({ opened, onBack, notice: initialNotice, onNoticeShown }:
           <IconButton icon="scissors" label={tool === 'cut' ? t("Desactivar el modo de corte (C)") : t("Modo de corte: corta con el mouse (C)")} active={tool === 'cut'} onClick={() => store.setTool(tool === 'cut' ? 'select' : 'cut')} />
           <IconButton icon="zoom" label={t("Añadir zoom aquí")} onClick={addZoomHere} />
           <IconButton icon="magnifier" label={t("Añadir una lupa aquí")} onClick={() => addMagnifierAt(store, store.getState().playhead)} />
+          <IconButton icon="text" label={t("Añadir texto aquí")} onClick={() => addTextAt(store, store.getState().playhead)} />
           {hasCamera && <IconButton icon="camera" label={t("Añadir cámara dinámica aquí")} onClick={addCameraHere} />}
           <IconButton icon="privacy" label={t("Añadir área de privacidad aquí")} onClick={addPrivacyHere} />
         </div>
@@ -327,8 +344,8 @@ function Timecode({ store }: { store: EditorStore }) {
 
 function ShortcutHelp({ onClose }: { onClose: () => void }) {
   const rows: [string, string][] = [
-    [t("Espacio"), t("Reproducir / pausar")], ['← →', t("Avanzar fotograma a fotograma (1 s con {key})", { key: keyLabel('shift') })], ['K', t("Cámara dinámica (mueve la cámara durante un intervalo)")], ['C', t("Modo de corte (haz clic con el mouse para cortar)")], ['S', t("Dividir en el cabezal de reproducción")],
-    ['Z', t("Herramienta de zoom")], ['M', t("Herramienta de lupa")], ['B', t("Herramienta de privacidad")], [t("V / Esc"), t("Herramienta de selección")], [t("Eliminar"), t("Eliminar el elemento seleccionado")],
+    [t("Espacio"), t("Reproducir / pausar")], ['← →', t("Avanzar fotograma a fotograma (1 s con {key})", { key: keyLabel('shift') })], ['K', t("Cámara dinámica (mueve la cámara durante un intervalo)")], ['C', t("Modo de corte (haz clic con el mouse para cortar)")], ['S', t("Dividir en el cabezal de reproducción")], ['[ ]  ·  , .', t("Ir a la marca anterior / siguiente")],
+    ['Z', t("Herramienta de zoom")], ['M', t("Herramienta de lupa")], ['T', t("Herramienta de texto")], ['B', t("Herramienta de privacidad")], [t("V / Esc"), t("Herramienta de selección")], [t("Eliminar"), t("Eliminar el elemento seleccionado")],
     [`${keyLabel('mod+Z')} / ${redoLabel()}`, t("Deshacer / rehacer")], [keyLabel('mod+E'), t("Exportar")], [t("{key} + desplazar", { key: keyLabel('mod') }), t("Escala de la línea de tiempo")],
     [[RECORDING_KEYS.stop, RECORDING_KEYS.pause, RECORDING_KEYS.mark].map(keyLabel).join(' · '), t("Al grabar: finalizar · pausar · marca")],
   ];

@@ -1,8 +1,9 @@
-import type { PrivacyLayer, Rect, RenderPlan } from '@momotombo/project-model';
+import type { ID, PrivacyLayer, Rect, RenderPlan, TextLayer } from '@momotombo/project-model';
 import { magnifierSampling, sourceToCanvas } from '@momotombo/project-model';
 import { createCursorSprite, type CursorSprite } from './cursor-sprite';
+import { RasterCache, anchoredBox, rasterKey, rasterizeText, type TextRaster } from './text-raster';
 import { GLError, Program, RenderTarget, createTexture, hexToRgba, premul, type GL } from './gl';
-import { BACKGROUND_FS, BLUR_FS, LAYER_FS, MAGNIFIER_FS, PRIVACY_FS, QUAD_VS, SHADOW_FS, SHAPE_FS } from './shaders';
+import { BACKGROUND_FS, BLUR_FS, LAYER_FS, MAGNIFIER_FS, PREMULTIPLIED_FS, PRIVACY_FS, QUAD_VS, SHADOW_FS, SHAPE_FS } from './shaders';
 
 export type FrameSource = TexImageSource;
 
@@ -46,6 +47,9 @@ export class Compositor {
   private blurB: RenderTarget;
   private cursor: CursorSprite;
   private cursorTex: WebGLTexture;
+  private text: Program;
+  private textCache: RasterCache<{ raster: TextRaster; tex: WebGLTexture }>;
+  private drawnTextBoxes = new Map<ID, Rect>();
   readonly stats: CompositorStats;
 
   constructor(readonly canvas: HTMLCanvasElement | OffscreenCanvas, opts: { preserveDrawingBuffer?: boolean } = {}) {
@@ -72,6 +76,8 @@ export class Compositor {
     this.blur = new Program(gl, QUAD_VS, BLUR_FS);
     this.privacy = new Program(gl, QUAD_VS, PRIVACY_FS);
     this.magnifier = new Program(gl, QUAD_VS, MAGNIFIER_FS);
+    this.text = new Program(gl, QUAD_VS, PREMULTIPLIED_FS);
+    this.textCache = new RasterCache((entry) => gl.deleteTexture(entry.tex));
     this.screenTex = createTexture(gl);
     this.cameraTex = createTexture(gl);
     this.bgTex = createTexture(gl, gl.LINEAR_MIPMAP_LINEAR);
@@ -257,7 +263,50 @@ export class Compositor {
         .set('uExp', cam.cornerExponent).set('uBorder', cam.border.width).set('uBorderColor', [br, bg, bb, ba]).set('uOpacity', cam.opacity);
       this.draw(this.layer, cam.rect, t);
     }
+    this.drawTexts(plan.texts, t);
     this.stats.lastRenderMs = performance.now() - t0;
+  }
+
+  /** Where each text of the last frame sits at rest (no animation offset or scale), in canvas pixels. */
+  get textBoxes(): ReadonlyMap<ID, Rect> {
+    return this.drawnTextBoxes;
+  }
+
+  private textTexture(layer: TextLayer) {
+    return this.textCache.get(rasterKey(layer), () => {
+      const gl = this.gl;
+      const raster = rasterizeText(layer, this.stats.maxTextureSize);
+      const tex = createTexture(gl);
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, raster.image);
+      gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+      return { raster, tex };
+    });
+  }
+
+  private drawTexts(layers: TextLayer[], t: { size: readonly [number, number]; flip: number }) {
+    const gl = this.gl;
+    this.drawnTextBoxes = new Map();
+    gl.activeTexture(gl.TEXTURE0);
+    for (const layer of layers) {
+      const { raster, tex } = this.textTexture(layer);
+      const k = 1 / raster.pixelScale;
+      const box = anchoredBox(layer.anchor, layer.position, raster.boxInImage.w * k, raster.boxInImage.h * k);
+      this.drawnTextBoxes.set(layer.id, box);
+      const cx = box.x + box.w / 2 + layer.offset.x;
+      const cy = box.y + box.h / 2 + layer.offset.y;
+      const s = layer.scale * k;
+      let x = cx - (raster.boxInImage.x + raster.boxInImage.w / 2) * s;
+      let y = cy - (raster.boxInImage.y + raster.boxInImage.h / 2) * s;
+      if (s === 1) { x = Math.round(x); y = Math.round(y); }
+      const w = raster.image.width * s;
+      const h = raster.image.height * s;
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      this.text.use().set('uTex', 0).set('uOpacity', layer.opacity);
+      this.draw(this.text, { x, y, w, h }, t);
+    }
+    this.textCache.endFrame();
   }
 
   private drawBackground(plan: RenderPlan, src: FrameSources, t: { size: readonly [number, number]; flip: number }) {
@@ -359,8 +408,9 @@ export class Compositor {
     if (this.disposed) return;
     this.disposed = true;
     const gl = this.gl;
-    for (const p of [this.layer, this.shadow, this.shape, this.bg, this.blur, this.privacy, this.magnifier]) p.dispose();
+    for (const p of [this.layer, this.shadow, this.shape, this.bg, this.blur, this.privacy, this.magnifier, this.text]) p.dispose();
     for (const tex of [this.screenTex, this.cameraTex, this.bgTex, this.cursorTex]) gl.deleteTexture(tex);
+    this.textCache.clear();
     gl.deleteVertexArray(this.quad);
     gl.deleteBuffer(this.quadBuf);
     this.fx.dispose();

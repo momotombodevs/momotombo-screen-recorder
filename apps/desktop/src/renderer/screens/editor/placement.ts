@@ -1,13 +1,12 @@
 import {
-  DEFAULT_MAGNIFIER_DURATION, laneRange, layoutSegments, newCameraMoveLayout, placeItem, presetTransition, timelineToSource, type ID, type NewCameraLayout, type NewMagnifier, type NewPrivacy, type NewZoom, type TrackKey,
+  DEFAULT_MAGNIFIER_DURATION, DEFAULT_TEXT_DURATION, TEXT_PRESETS, defaultPrivacyLook, freeTextPosition, laneRange, layoutSegments, newCameraMoveLayout, placeItem,
+  presetTransition, timelineToSource, type ID, type NewByKey, type TextPresetId, type TrackKey, type Vec2,
 } from '@momotombo/project-model';
 import type { Ticks } from '@momotombo/timing';
 import type { EditorStore, SelectionKind } from '../../state/editor-store';
 import { t } from '../../i18n';
 
-const KIND: Record<TrackKey, SelectionKind> = { zooms: 'zoom', privacy: 'privacy', cameraLayouts: 'camera', magnifiers: 'magnifier' };
-
-type NewByKey = { zooms: NewZoom; cameraLayouts: NewCameraLayout; privacy: NewPrivacy; magnifiers: NewMagnifier };
+const KIND: Record<TrackKey, SelectionKind> = { zooms: 'zoom', privacy: 'privacy', cameraLayouts: 'camera', magnifiers: 'magnifier', texts: 'text' };
 
 /** Adds an item through the placement rules and tells the user when it is refused. */
 export function place<K extends TrackKey>(store: EditorStore, key: K, item: NewByKey[K]): boolean {
@@ -41,7 +40,7 @@ export function placeRange(store: EditorStore, key: TrackKey, r: { recordingId: 
   const p = store.project;
   if (key === 'privacy') {
     return place(store, 'privacy', {
-      ...r, origin: 'manual', region: DEFAULT_PRIVACY_REGION, keyframes: [], effect: { kind: 'frosted' }, cornerRadius: 0.12, padFrames: 2,
+      ...r, origin: 'manual', region: DEFAULT_PRIVACY_REGION, ...defaultPrivacyLook(),
     });
   }
   if (key === 'cameraLayouts') {
@@ -53,6 +52,7 @@ export function placeRange(store: EditorStore, key: TrackKey, r: { recordingId: 
     const m = p.style.magnifier;
     return place(store, 'magnifiers', { ...r, origin: 'manual', size: m.size, zoom: m.zoom });
   }
+  if (key === 'texts') return place(store, 'texts', newText(r));
   const d = p.style.zoomDefaults;
   return place(store, 'zooms', { ...r, origin: 'manual', mode: 'region', center: { x: 0.5, y: 0.5 }, scale: d.scale, enter: d.enter, exit: d.exit });
 }
@@ -70,4 +70,15 @@ export function addMagnifierAt(store: EditorStore, at: Ticks): boolean {
   const r = laneRange(p, 'magnifiers', at, at + DEFAULT_MAGNIFIER_DURATION);
   if (!r) { store.notify(t("Aquí no hay espacio para un nuevo intervalo de lupa.")); return false; }
   return placeRange(store, 'magnifiers', r);
+}
+
+export function newText(r: { recordingId: ID; start: Ticks; end: Ticks }, preset: TextPresetId = 'title', position?: Vec2): NewByKey['texts'] {
+  const look = TEXT_PRESETS[preset];
+  return { ...r, origin: 'manual', text: t("Escribe tu texto"), ...look, position: position ?? look.position };
+}
+
+export function addTextAt(store: EditorStore, at: Ticks, position?: Vec2): boolean {
+  const r = laneRange(store.project, 'texts', at, at + DEFAULT_TEXT_DURATION);
+  if (!r) { store.notify(t("Aquí no hay espacio para un nuevo texto.")); return false; }
+  return place(store, 'texts', newText(r, 'title', freeTextPosition(store.project.texts, r, position ?? TEXT_PRESETS.title.position)));
 }
