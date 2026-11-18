@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, readdir, rm, utimes, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rename, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { serializeProject, type Recording } from '@momotombo/project-model';
@@ -7,6 +7,20 @@ import { afterAll, describe, expect, it, vi } from 'vitest';
 vi.mock('electron', () => ({
   app: { getPath: () => tmpdir(), getPreferredSystemLanguages: () => ['en-US'], getLocale: () => 'en' },
 }));
+const afterNextRead: { run?: () => Promise<void> } = {};
+vi.mock('./project-file', async (original) => {
+  const real = await original<typeof import('./project-file')>();
+  return {
+    ...real,
+    readProjectText: async (dir: string) => {
+      const text = await real.readProjectText(dir);
+      const run = afterNextRead.run;
+      afterNextRead.run = undefined;
+      await run?.();
+      return text;
+    },
+  };
+});
 const { ProjectStore } = await import('./projects');
 
 const roots: string[] = [];
@@ -216,6 +230,54 @@ describe('ProjectStore: edits made outside the app', () => {
     await store.rename(id, 'Renamed in the app');
     expect(seen).toEqual(['From the CLI']);
     store.stopWatching();
+  });
+
+  it('delivers a project.json replaced by a renamed temporary file, as the CLI writes it', async () => {
+    const { store, dir, opened, seen } = await watched();
+    const tmp = join(dir, 'project.json.cli.tmp');
+    await writeFile(tmp, serializeProject({ ...opened, name: 'Renamed into place' }));
+    await rename(tmp, join(dir, 'project.json'));
+    await vi.waitFor(() => expect(seen).toEqual(['Renamed into place']));
+    store.stopWatching();
+  });
+
+  it('delivers an edit that lands while the watch is starting', async () => {
+    const { store, created } = await storeWith(1);
+    const { id, dir } = created[0]!;
+    const opened = await store.read(id);
+    const seen: string[] = [];
+    afterNextRead.run = () => writeOutside(dir, serializeProject({ ...opened, name: 'Edited while starting' }));
+    await store.watchExternalEdits(id, (p) => seen.push(p.name));
+    await vi.waitFor(() => expect(seen).toEqual(['Edited while starting']));
+    store.stopWatching();
+  });
+
+  it('keeps only the latest of two overlapping watches', async () => {
+    const { store, created } = await storeWith(2);
+    const [a, b] = created;
+    const openedA = await store.read(a!.id);
+    const openedB = await store.read(b!.id);
+    const seenA: string[] = [];
+    const seenB: string[] = [];
+    await Promise.all([store.watchExternalEdits(a!.id, (p) => seenA.push(p.name)), store.watchExternalEdits(b!.id, (p) => seenB.push(p.name))]);
+    await writeOutside(a!.dir, serializeProject({ ...openedA, name: 'A edited' }));
+    await writeOutside(b!.dir, serializeProject({ ...openedB, name: 'B edited' }));
+    await vi.waitFor(() => expect(seenB).toEqual(['B edited']));
+    await settled();
+    expect(seenA).toEqual([]);
+    store.stopWatching();
+  });
+
+  it('does not start a watch that was stopped while it was starting', async () => {
+    const { store, created } = await storeWith(1);
+    const { id, dir } = created[0]!;
+    const opened = await store.read(id);
+    const seen: string[] = [];
+    afterNextRead.run = async () => store.stopWatching();
+    await store.watchExternalEdits(id, (p) => seen.push(p.name));
+    await writeOutside(dir, serializeProject({ ...opened, name: 'After close' }));
+    await settled();
+    expect(seen).toEqual([]);
   });
 
   it('ignores a file that is not a valid project and delivers the next valid one', async () => {

@@ -5,7 +5,7 @@ import { basename, dirname, extname, join } from 'node:path';
 import {
   addRecording, createProject, parseProject, sequenceDuration, serializeProject, type Project, type Recording,
 } from '@momotombo/project-model';
-import { IMPORT_VIDEO_TYPES, type ImportedVideo, type ProjectSummary } from '@momotombo/protocol';
+import { IMPORT_VIDEO_TYPES, type ImportedVideo, type PeaksStamp, type ProjectSummary } from '@momotombo/protocol';
 import { PROJECT_FILE } from '../shared/brand';
 import { dirSize, exists, removeQuiet, safeJoin, writeFileAtomic } from './fsutil';
 import { readProjectText, validatedProjectText, writeProjectTextKeepingBackup } from './project-file';
@@ -16,8 +16,6 @@ const EXTERNAL_EDIT_POLL_MS = 250;
 const KNOWN_TEXTS_KEPT = 16;
 const PEAKS_MAGIC = 'MPK1';
 const PEAKS_HEADER = 20;
-
-export interface PeaksStamp { size: number; mtimeMs: number }
 
 interface ExternalEditWatch {
   onEdit: (project: Project) => void;
@@ -32,6 +30,7 @@ interface ExternalEditWatch {
 export class ProjectStore {
   private dirs = new Map<string, string>();
   private writeChain = new Map<string, Promise<unknown>>();
+  private watchGeneration = 0;
   /** Changes made by create()/forget() while a scan runs, applied over that scan's result. */
   private scanLogs = new Set<Map<string, string | null>>();
   /**
@@ -223,6 +222,7 @@ export class ProjectStore {
    */
   async watchExternalEdits(id: string, onEdit: (project: Project) => void): Promise<void> {
     this.stopWatching();
+    const generation = this.watchGeneration;
     const dir = this.dirOf(id);
     const file = join(dir, PROJECT_FILE);
     let settle: ReturnType<typeof setTimeout> | undefined;
@@ -230,9 +230,11 @@ export class ProjectStore {
       clearTimeout(settle);
       settle = setTimeout(() => void this.serialized(id, () => this.deliverExternalEdit(id)), EXTERNAL_EDIT_SETTLE_MS);
     };
+    const knownText = await readProjectText(dir).catch(() => '');
+    if (generation !== this.watchGeneration) return;
     const w: ExternalEditWatch = {
       onEdit,
-      knownTexts: [await readProjectText(dir).catch(() => '')],
+      knownTexts: [knownText],
       stop: () => {
         clearTimeout(settle);
         unwatchFile(file, changed);
@@ -241,9 +243,11 @@ export class ProjectStore {
     };
     this.watches.set(id, w);
     watchFile(file, { interval: EXTERNAL_EDIT_POLL_MS, persistent: false }, changed);
+    changed();
   }
 
   stopWatching(): void {
+    this.watchGeneration++;
     for (const w of [...this.watches.values()]) w.stop();
   }
 
