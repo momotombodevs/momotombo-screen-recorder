@@ -33,12 +33,19 @@ describe('writeProjectTextIfUnchanged', () => {
 });
 
 describe('backup history', () => {
-  it(`keeps the last ${BACKUPS_KEPT} versions, oldest dropped first`, async () => {
-    for (let i = 1; i <= BACKUPS_KEPT + 2; i++) await writeProjectTextKeepingBackup(dir, `v${i}`);
+  it('keeps only project.json.bak for editor saves', async () => {
+    await writeProjectTextKeepingBackup(dir, 'v1');
+    expect(await readFile(`${file()}.bak`, 'utf8')).toBe('v0');
+    expect((await readdir(dir)).sort()).toEqual(['project.json', 'project.json.bak']);
+  });
+
+  it(`keeps the last ${BACKUPS_KEPT} versions written from the command line, oldest dropped first`, async () => {
+    for (let i = 1; i <= BACKUPS_KEPT + 2; i++) await writeProjectTextIfUnchanged(dir, `v${i - 1}`, `v${i}`);
     const kept = await backups();
     expect(kept).toHaveLength(BACKUPS_KEPT);
     const texts = await Promise.all(kept.map((n) => readFile(join(backupDir(dir), n), 'utf8')));
     expect(texts).toEqual(['v2', 'v3', 'v4', 'v5', 'v6']);
+    expect(await readFile(file(), 'utf8')).toBe('v7');
     expect(await readFile(`${file()}.bak`, 'utf8')).toBe('v6');
   });
 });
