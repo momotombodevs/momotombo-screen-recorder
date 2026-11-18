@@ -1,18 +1,21 @@
-import { randomBytes } from 'node:crypto';
-import { watch, type FSWatcher } from 'node:fs';
+import { createHash, randomBytes } from 'node:crypto';
+import { unwatchFile, watchFile } from 'node:fs';
 import { copyFile, mkdir, readFile, readdir, stat } from 'node:fs/promises';
 import { basename, dirname, extname, join } from 'node:path';
 import {
   addRecording, createProject, parseProject, sequenceDuration, serializeProject, type Project, type Recording,
 } from '@momotombo/project-model';
-import { IMPORT_VIDEO_TYPES, type ImportedVideo, type ProjectSummary } from '@momotombo/protocol';
+import { IMPORT_VIDEO_TYPES, type ImportedVideo, type PeaksStamp, type ProjectSummary } from '@momotombo/protocol';
 import { PROJECT_FILE } from '../shared/brand';
 import { dirSize, exists, removeQuiet, safeJoin, writeFileAtomic } from './fsutil';
 import { readProjectText, validatedProjectText, writeProjectTextKeepingBackup } from './project-file';
 import { tm } from './settings';
 
 const EXTERNAL_EDIT_SETTLE_MS = 80;
+const EXTERNAL_EDIT_POLL_MS = 250;
 const KNOWN_TEXTS_KEPT = 16;
+const PEAKS_MAGIC = 'MPK1';
+const PEAKS_HEADER = 20;
 
 interface ExternalEditWatch {
   onEdit: (project: Project) => void;
@@ -27,6 +30,7 @@ interface ExternalEditWatch {
 export class ProjectStore {
   private dirs = new Map<string, string>();
   private writeChain = new Map<string, Promise<unknown>>();
+  private watchGeneration = 0;
   /** Changes made by create()/forget() while a scan runs, applied over that scan's result. */
   private scanLogs = new Set<Map<string, string | null>>();
   /**
@@ -218,33 +222,32 @@ export class ProjectStore {
    */
   async watchExternalEdits(id: string, onEdit: (project: Project) => void): Promise<void> {
     this.stopWatching();
+    const generation = this.watchGeneration;
     const dir = this.dirOf(id);
+    const file = join(dir, PROJECT_FILE);
     let settle: ReturnType<typeof setTimeout> | undefined;
-    let watcher: FSWatcher;
-    try {
-      watcher = watch(dir, (_event, name) => {
-        if (name !== PROJECT_FILE) return;
-        clearTimeout(settle);
-        settle = setTimeout(() => void this.serialized(id, () => this.deliverExternalEdit(id)), EXTERNAL_EDIT_SETTLE_MS);
-      });
-    } catch (e) {
-      process.stderr.write(`Cannot watch ${dir} for outside edits: ${String(e)}\n`);
-      return;
-    }
+    const changed = () => {
+      clearTimeout(settle);
+      settle = setTimeout(() => void this.serialized(id, () => this.deliverExternalEdit(id)), EXTERNAL_EDIT_SETTLE_MS);
+    };
+    const knownText = await readProjectText(dir).catch(() => '');
+    if (generation !== this.watchGeneration) return;
     const w: ExternalEditWatch = {
       onEdit,
-      knownTexts: [await readProjectText(dir).catch(() => '')],
+      knownTexts: [knownText],
       stop: () => {
         clearTimeout(settle);
-        watcher.close();
+        unwatchFile(file, changed);
         if (this.watches.get(id) === w) this.watches.delete(id);
       },
     };
-    watcher.on('error', w.stop);
     this.watches.set(id, w);
+    watchFile(file, { interval: EXTERNAL_EDIT_POLL_MS, persistent: false }, changed);
+    changed();
   }
 
   stopWatching(): void {
+    this.watchGeneration++;
     for (const w of [...this.watches.values()]) w.stop();
   }
 
@@ -284,6 +287,35 @@ export class ProjectStore {
 
   async setThumbnail(id: string, jpeg: Uint8Array): Promise<void> {
     await writeFileAtomic(join(this.dirOf(id), 'cache', 'thumbnail.jpg'), jpeg);
+  }
+
+  async readPeaks(id: string, file: string): Promise<{ stamp: PeaksStamp; data: Uint8Array | null }> {
+    const { source, cache } = this.peaksPaths(id, file);
+    const info = await stat(source);
+    const stamp = { size: info.size, mtimeMs: info.mtimeMs };
+    const bytes = await readFile(cache).catch(() => null);
+    if (!bytes || bytes.length < PEAKS_HEADER || bytes.toString('latin1', 0, 4) !== PEAKS_MAGIC) return { stamp, data: null };
+    const same = bytes.readDoubleLE(4) === stamp.size && bytes.readDoubleLE(12) === stamp.mtimeMs;
+    return { stamp, data: same ? bytes.subarray(PEAKS_HEADER) : null };
+  }
+
+  async writePeaks(id: string, file: string, stamp: PeaksStamp, data: Uint8Array): Promise<boolean> {
+    const { source, cache } = this.peaksPaths(id, file);
+    const info = await stat(source);
+    if (info.size !== stamp.size || info.mtimeMs !== stamp.mtimeMs) return false;
+    const header = Buffer.alloc(PEAKS_HEADER);
+    header.write(PEAKS_MAGIC, 0, 'latin1');
+    header.writeDoubleLE(stamp.size, 4);
+    header.writeDoubleLE(stamp.mtimeMs, 12);
+    await mkdir(dirname(cache), { recursive: true });
+    await writeFileAtomic(cache, Buffer.concat([header, data]));
+    return true;
+  }
+
+  private peaksPaths(id: string, file: string): { source: string; cache: string } {
+    if (!file.startsWith('media/')) throw new Error('Invalid path');
+    const name = `peaks-${createHash('sha256').update(file).digest('hex').slice(0, 20)}.bin`;
+    return { source: this.resolve(id, file), cache: join(this.dirOf(id), 'cache', name) };
   }
 
   forget(id: string): void {

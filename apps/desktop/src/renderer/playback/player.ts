@@ -4,6 +4,7 @@ import type { EditorStore } from '../state/editor-store';
 import { probe } from '../perf-probe';
 import { PreviewAudio } from '../audio/preview-audio';
 import { LoudnessTracker, type Loudness } from '../audio/measure';
+import type { DecodedAudio } from '../export/audio-mix';
 
 export interface RecordingMedia {
   screen?: HTMLVideoElement;
@@ -96,12 +97,13 @@ export class Player {
   private shown: Ticks = 0;
   private readonly audio = new PreviewAudio(() => this.applyAudio());
   private readonly tracker: LoudnessTracker;
+  readonly decodeCache = new Map<string, Promise<DecodedAudio>>();
   private audioInfoSnapshot: PreviewAudioInfo = { mic: { state: 'off' }, system: { state: 'off' }, enhancementUnavailable: false };
   private audioListeners = new Set<() => void>();
   private starting = false;
 
   constructor(private readonly store: EditorStore) {
-    this.tracker = new LoudnessTracker(store.getState().mediaBase);
+    this.tracker = new LoudnessTracker(store.getState().mediaBase, undefined, this.decodeCache);
     this.tracker.subscribe(() => this.applyAudio());
     this.sync(store.project);
     this.unsub = store.subscribe(() => {

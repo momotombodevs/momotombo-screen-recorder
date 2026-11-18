@@ -19,6 +19,7 @@ import { CaptureManager } from './capture/manager';
 import { runCodecProbe } from './codec-probe';
 import { extractImportAudio } from './import-audio';
 import { exists } from './fsutil';
+import { requireSender } from './ipc-guard';
 import { MfExports } from './mf-export';
 import { displayFolder, ExportTargets, ExportWriter, safeBaseName, uniquePath, writableFolder, writeErrorMessage } from './export-writer';
 import { handleMediaProtocol, mediaBase, registerMediaScheme } from './media-protocol';
@@ -167,6 +168,7 @@ function handleNoArgs(channel: string, fn: (e: IpcMainInvokeEvent) => unknown): 
 }
 
 function registerIpc(): void {
+  const isMainWindow = (e: IpcMainInvokeEvent) => e.sender === mainWindow?.webContents;
   // macOS applies a new screen recording permission only to a freshly started app.
   handleNoArgs('app:relaunch', () => { app.relaunch(); app.exit(0); });
   handleNoArgs('app:info', (): AppInfo => ({
@@ -202,6 +204,9 @@ function registerIpc(): void {
   });
   handle('projects:reveal', ({ id }) => shell.showItemInFolder(join(store.dirOf(id), 'project.json')));
   handle('projects:readText', async ({ id, path }) => readFile(store.resolve(id, path), 'utf8'));
+  const fromMainWindow = (e: IpcMainInvokeEvent) => requireSender(e.sender, mainWindow?.webContents);
+  handle('projects:readPeaks', ({ id, file }, e) => { fromMainWindow(e); return store.readPeaks(id, file); });
+  handle('projects:writePeaks', ({ id, file, stamp, data }, e) => { fromMainWindow(e); return store.writePeaks(id, file, stamp, data); });
   handle('projects:setThumbnail', async ({ id, dataUrl }) => {
     await store.setThumbnail(id, Buffer.from(dataUrl.slice(dataUrl.indexOf(',') + 1), 'base64'));
   });
@@ -386,7 +391,6 @@ function registerIpc(): void {
   });
   // Exports momotombo-edit asks for (shared/export-request.ts). The request file comes from any
   // local process, so it is validated here and the renderer only ever gets a one-time target token.
-  const isMainWindow = (e: IpcMainInvokeEvent) => e.sender === mainWindow?.webContents;
   const cli = new CliExports({
     root: store.root,
     projectDirs: () => store.entries(),

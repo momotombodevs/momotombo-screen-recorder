@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type PointerEvent as RPointerEvent, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type PointerEvent as RPointerEvent, type ReactNode } from 'react';
 import {
   DEFAULT_CAMERA_MOVE, cameraSplitTime, clampDrag, freeWindow, itemTimelineRanges, laneRange, layoutSegments, sequenceDuration, sourceToTimeline, splitAt,
   trimSegment, updateCameraLayout, updateMagnifier, updatePrivacy, updateText, updateZoom, type ID, type ItemBase, type TrackItem, type TrackKey,
@@ -12,6 +12,10 @@ import { placeName } from './camera-names';
 import { importVideo } from './import-media';
 import { activityBins, niceStep, tickLabel } from './timeline-scale';
 import { t } from '../../i18n';
+import { waveGain } from '../../audio/peaks';
+import { WaveformPeaks, projectPeaksIo } from '../../audio/waveform-peaks';
+import { AudioWave } from './AudioWave';
+import { markerTimes } from './markers';
 import { probe } from '../../perf-probe';
 
 const LABEL_W = 140;
@@ -96,6 +100,21 @@ export function Timeline({ store, player }: { store: EditorStore; player: Player
   const x = (t: Ticks) => (t / TICKS_PER_SECOND) * pps;
 
   useEffect(() => () => cleanupRef.current?.(), []);
+
+  const audioInfo = useSyncExternalStore(player.onAudioInfo, player.audioInfo);
+  const [waveform, setWaveform] = useState<WaveformPeaks | null>(null);
+  useEffect(() => {
+    const w = new WaveformPeaks(projectPeaksIo(store.project.id, store.getState().mediaBase, player.decodeCache, (k) => store.project.audio[k].normalize.enabled));
+    setWaveform(w);
+    return () => w.dispose();
+  }, [store, player]);
+  const recordings = project.recordings;
+  useEffect(() => { waveform?.update(recordings); }, [waveform, recordings]);
+
+  const seekTo = (at: Ticks) => {
+    if (store.getState().playing) player.pause();
+    store.setPlayhead(at);
+  };
 
   // Keep the playhead in view while playing. Done from the store, not from a redraw: the
   // timeline itself is not redrawn while the playhead moves (PlayheadLine and RulerTime are).
@@ -442,7 +461,6 @@ export function Timeline({ store, player }: { store: EditorStore; player: Player
         {main && <span className="tl-grip start" onPointerDown={(e) => press(e, { kind: 'segment', id: pl.segment.id, mode: 'start', start0: pl.segment.sourceStart, end0: pl.segment.sourceEnd })} />}
         {main && <span className="tl-label">{formatTimecode(pl.timelineEnd - pl.timelineStart)}</span>}
         {main && <span className="tl-grip end" onPointerDown={(e) => press(e, { kind: 'segment', id: pl.segment.id, mode: 'end', start0: pl.segment.sourceStart, end0: pl.segment.sourceEnd })} />}
-        {(kind === 'mic' || kind === 'system') && <span className="tl-wave" />}
       </div>
     );
   });
@@ -452,9 +470,7 @@ export function Timeline({ store, player }: { store: EditorStore; player: Player
     <span key={i} style={{ left: (b.t / TICKS_PER_SECOND) * pps, width: Math.max(1, pps * 0.5 - 1), height: 2 + b.v * 9, opacity: 0.25 + b.v * 0.75 }} />
   )), [placements, cursors, pps]);
 
-  const recordings = project.recordings;
-  // sourceToTimeline reads only the placements it is given.
-  const markers = useMemo(() => Object.values(recordings).flatMap((r) => r.markers.map((m) => sourceToTimeline(project, r.id, m, placements)).filter((t): t is number => t !== null)), [recordings, placements]); // eslint-disable-line react-hooks/exhaustive-deps
+  const markers = useMemo(() => markerTimes(recordings, placements), [recordings, placements]);
 
   const step = niceStep(pps);
   const ticks: ReactNode[] = [];
@@ -488,6 +504,10 @@ export function Timeline({ store, player }: { store: EditorStore; player: Player
   const ML = 30;
   const CL = 30;
   const PL = 26;
+  const AL = 40;
+  const wave = (kind: 'mic' | 'system') => waveform && (
+    <AudioWave kind={kind} gain={waveGain(project.audio[kind], audioInfo[kind])} project={project} placements={placements} pxPerSecond={pps} waveform={waveform} scrollRef={scrollRef} labelWidth={LABEL_W} />
+  );
 
   return (
     <div className={`timeline${cutting ? ' is-cutting' : ''}${addLane ? ` is-adding adding-${addLane}` : ''}`}>
@@ -506,7 +526,24 @@ export function Timeline({ store, player }: { store: EditorStore; player: Player
               <div className="tl-activity">
                 {activityStrip}
               </div>
-              {markers.map((m, i) => <span key={i} className="tl-marker" style={{ left: x(m) }} title={t("Marca")}><Icon name="marker" size={11} /></span>)}
+              {markers.map((m) => {
+                const label = t("Marca en {time}", { time: formatTimecode(m, project.sequence.fps) });
+                return (
+                  <button
+                    key={m}
+                    type="button"
+                    className="tl-marker"
+                    style={{ left: x(m) }}
+                    title={label}
+                    aria-label={label}
+                    onPointerDown={(e) => e.stopPropagation()}
+                    onKeyDown={(e) => { if (e.key === ' ') { e.preventDefault(); e.stopPropagation(); seekTo(m); } }}
+                    onClick={() => seekTo(m)}
+                  >
+                    <Icon name="marker" size={11} />
+                  </button>
+                );
+              })}
             </div>
           </div>
           {row(t("Texto"), 'text', 'tr-text', TL * textLayout.count, itemBlocks('text', textLayout, TL),
@@ -536,8 +573,8 @@ export function Timeline({ store, player }: { store: EditorStore; player: Player
             </button>
           </>)}
           {hasKind('camera') && row(t("Cámara"), 'camera', 'tr-camera', 26, segmentBlocks('camera'))}
-          {hasKind('mic') && row(t("Micrófono"), 'mic', 'tr-mic', 26, segmentBlocks('mic'))}
-          {hasKind('system') && row(systemLabel, 'speaker', 'tr-system', 26, segmentBlocks('system'))}
+          {hasKind('mic') && row(t("Micrófono"), 'mic', 'tr-mic', AL, <>{segmentBlocks('mic')}{wave('mic')}</>)}
+          {hasKind('system') && row(systemLabel, 'speaker', 'tr-system', AL, <>{segmentBlocks('system')}{wave('system')}</>)}
           {addLane && addHover !== null && !draft && (
             <div className={`tl-addline tl-addline-${addLane}`} style={{ left: LABEL_W + x(addHover) }}>
               <span className="tl-addline-label">

@@ -1,5 +1,5 @@
 import type {
-  AppInfo, BackendInfo, CaptureConfig, CaptureResult, CaptureState, OpenedProject, PermissionInfo, ProjectSummary, RecoveryNotice, SourceInfo, ImportedVideo, PickedFile, ThirdPartyInfo, ExportTarget, EncoderInfo, RecorderPrefs, CliExportJob, CliExportReport,
+  AppInfo, BackendInfo, CaptureConfig, CaptureResult, CaptureState, OpenedProject, PermissionInfo, ProjectSummary, RecoveryNotice, SourceInfo, ImportedVideo, PickedFile, ThirdPartyInfo, ExportTarget, EncoderInfo, RecorderPrefs, CliExportJob, CliExportReport, PeaksStamp,
 } from '@momotombo/protocol';
 import type { LangSetting, SettingsInfo } from '../shared/i18n';
 import type { DiskEstimate } from '../shared/recording-budget';
@@ -34,6 +34,8 @@ export const api = {
   trashProject: (id: string) => call<void>('projects:trash', { id }),
   revealProject: (id: string) => call<void>('projects:reveal', { id }),
   readProjectText: (id: string, path: string) => call<string>('projects:readText', { id, path }),
+  readPeaks: (id: string, file: string) => call<{ stamp: PeaksStamp; data: Uint8Array | null }>('projects:readPeaks', { id, file }),
+  writePeaks: (id: string, file: string, stamp: PeaksStamp, data: Uint8Array) => call<boolean>('projects:writePeaks', { id, file, stamp, data }),
   setThumbnail: (id: string, dataUrl: string) => call<void>('projects:setThumbnail', { id, dataUrl }),
   onProjectChanged: (fn: (change: { id: string; json: unknown }) => void) => bridge().on('projects:changed', (d) => fn(d as { id: string; json: unknown })),
   closeProject: () => call<void>('projects:close'),

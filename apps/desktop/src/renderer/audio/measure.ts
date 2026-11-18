@@ -30,13 +30,16 @@ const yieldToUi = () => new Promise<void>((r) => setTimeout(r, 0));
 export class LoudnessTracker {
   private results = new Map<string, number | null>();
   private failed = new Set<string>();
-  private decoded = new Map<string, Promise<DecodedAudio>>();
   private job: { key: string; ctl: AbortController } | null = null;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private listeners = new Set<() => void>();
   private project: Project | null = null;
 
-  constructor(private readonly mediaBase: string, private readonly debounceMs = 300) {}
+  constructor(
+    private readonly mediaBase: string,
+    private readonly debounceMs = 300,
+    private readonly decoded = new Map<string, Promise<DecodedAudio>>(),
+  ) {}
 
   get(project: Project, kind: AudioKind): Loudness {
     if (!project.audio[kind].normalize.enabled) return { state: 'off' };
