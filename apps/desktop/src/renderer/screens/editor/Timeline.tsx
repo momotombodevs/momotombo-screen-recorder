@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type PointerEvent as RPointerEvent, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type PointerEvent as RPointerEvent, type ReactNode } from 'react';
 import {
   DEFAULT_CAMERA_MOVE, cameraSplitTime, clampDrag, freeWindow, itemTimelineRanges, laneRange, layoutSegments, sequenceDuration, sourceToTimeline, splitAt,
   trimSegment, updateCameraLayout, updateMagnifier, updatePrivacy, updateText, updateZoom, type ID, type ItemBase, type TrackItem, type TrackKey,
@@ -12,6 +12,7 @@ import { placeName } from './camera-names';
 import { importVideo } from './import-media';
 import { activityBins, niceStep, tickLabel } from './timeline-scale';
 import { t } from '../../i18n';
+import { waveGain } from '../../audio/peaks';
 import { WaveformPeaks, projectPeaksIo } from '../../audio/waveform-peaks';
 import { AudioWave } from './AudioWave';
 import { markerTimes } from './markers';
@@ -100,13 +101,15 @@ export function Timeline({ store, player }: { store: EditorStore; player: Player
 
   useEffect(() => () => cleanupRef.current?.(), []);
 
+  const audioInfo = useSyncExternalStore(player.onAudioInfo, player.audioInfo);
   const [waveform, setWaveform] = useState<WaveformPeaks | null>(null);
   useEffect(() => {
     const w = new WaveformPeaks(projectPeaksIo(store.project.id, store.getState().mediaBase, player.decodeCache, (k) => store.project.audio[k].normalize.enabled));
     setWaveform(w);
     return () => w.dispose();
   }, [store, player]);
-  useEffect(() => { waveform?.update(project); }, [waveform, project.recordings]); // eslint-disable-line react-hooks/exhaustive-deps
+  const recordings = project.recordings;
+  useEffect(() => { waveform?.update(recordings); }, [waveform, recordings]);
 
   const seekTo = (at: Ticks) => {
     if (store.getState().playing) player.pause();
@@ -467,7 +470,6 @@ export function Timeline({ store, player }: { store: EditorStore; player: Player
     <span key={i} style={{ left: (b.t / TICKS_PER_SECOND) * pps, width: Math.max(1, pps * 0.5 - 1), height: 2 + b.v * 9, opacity: 0.25 + b.v * 0.75 }} />
   )), [placements, cursors, pps]);
 
-  const recordings = project.recordings;
   // markerTimes reads only the recordings and the placements it is given.
   const markers = useMemo(() => markerTimes(project, placements), [recordings, placements]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -505,7 +507,7 @@ export function Timeline({ store, player }: { store: EditorStore; player: Player
   const PL = 26;
   const AL = 40;
   const wave = (kind: 'mic' | 'system') => waveform && (
-    <AudioWave kind={kind} project={project} placements={placements} pxPerSecond={pps} waveform={waveform} scrollRef={scrollRef} labelWidth={LABEL_W} />
+    <AudioWave kind={kind} gain={waveGain(project.audio[kind], audioInfo[kind])} project={project} placements={placements} pxPerSecond={pps} waveform={waveform} scrollRef={scrollRef} labelWidth={LABEL_W} />
   );
 
   return (
@@ -525,11 +527,11 @@ export function Timeline({ store, player }: { store: EditorStore; player: Player
               <div className="tl-activity">
                 {activityStrip}
               </div>
-              {markers.map((m, i) => {
+              {markers.map((m) => {
                 const label = t("Marca en {time}", { time: formatTimecode(m, project.sequence.fps) });
                 return (
                   <button
-                    key={i}
+                    key={m}
                     type="button"
                     className="tl-marker"
                     style={{ left: x(m) }}

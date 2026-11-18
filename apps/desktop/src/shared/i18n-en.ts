@@ -475,6 +475,7 @@ export const EN: Record<string, string> = {
   "Sección: pantalla, cámara y audio juntos": "Section: screen, camera and audio together",
   "Marca en {time}": "Marker at {time}",
   "No hay más marcas en esa dirección.": "No more markers in that direction.",
+  "Forma de onda no disponible": "Waveform unavailable",
   "Privacidad": "Privacy",
   "Arrastra el cabezal de reproducción": "Drag the playhead",
   "Esta área ya se oculta en este momento. Seleccioné el área existente; puedes editarla o dibujar en otro lugar.": "This area is already hidden at this time. I selected the existing area; you can edit it or draw somewhere else.",

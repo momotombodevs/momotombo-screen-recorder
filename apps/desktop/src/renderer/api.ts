@@ -1,5 +1,5 @@
 import type {
-  AppInfo, BackendInfo, CaptureConfig, CaptureResult, CaptureState, OpenedProject, PermissionInfo, ProjectSummary, RecoveryNotice, SourceInfo, ImportedVideo, PickedFile, ThirdPartyInfo, ExportTarget, EncoderInfo, RecorderPrefs, CliExportJob, CliExportReport,
+  AppInfo, BackendInfo, CaptureConfig, CaptureResult, CaptureState, OpenedProject, PermissionInfo, ProjectSummary, RecoveryNotice, SourceInfo, ImportedVideo, PickedFile, ThirdPartyInfo, ExportTarget, EncoderInfo, RecorderPrefs, CliExportJob, CliExportReport, PeaksStamp,
 } from '@momotombo/protocol';
 import type { LangSetting, SettingsInfo } from '../shared/i18n';
 import type { DiskEstimate } from '../shared/recording-budget';
@@ -15,8 +15,6 @@ declare global {
     momotombo: Bridge;
   }
 }
-
-export interface PeaksStamp { size: number; mtimeMs: number }
 
 const bridge = (): Bridge => window.momotombo;
 /** Electron wraps errors from the main process ("Error invoking remote method 'x': Error: …"); keep only the message. */

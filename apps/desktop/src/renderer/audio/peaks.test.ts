@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { addRecording, createProject, layoutSegments, removeSegment, splitAt, type Project, type Recording } from '@momotombo/project-model';
+import { addRecording, createProject, defaultAudio, layoutSegments, removeSegment, splitAt, type Project, type Recording } from '@momotombo/project-model';
 import { secondsToTicks as sec } from '@momotombo/timing';
 import {
-  FULL_SCALE, audioSlices, waveHeight, columnLevel, computePeaks, decodePeaks, encodePeaks, peakDecodeRate, silentRanges, type Peaks,
+  FULL_SCALE, audioSlices, waveGain, waveHeight, columnLevel, computePeaks, decodePeaks, encodePeaks, peakDecodeRate, silentRanges, type Peaks,
 } from './peaks';
 
 const level = (v: number) => v / FULL_SCALE;
@@ -105,6 +105,23 @@ describe('waveHeight', () => {
     expect(waveHeight(0.1, 2)).toBeGreaterThan(waveHeight(0.1, 1));
     expect(waveHeight(0.5, 3)).toBe(1);
     expect(waveHeight(0.5, 0)).toBe(0);
+  });
+});
+
+describe('waveGain', () => {
+  const mic = defaultAudio().mic;
+  const normalized = { ...mic, gain: 2, normalize: { enabled: true, targetLufs: -16 } };
+
+  it('is the channel gain while normalisation is off or still measuring', () => {
+    expect(waveGain({ ...mic, gain: 1.5 }, { state: 'off' })).toBe(1.5);
+    expect(waveGain(normalized, { state: 'measuring' })).toBe(2);
+    expect(waveGain(normalized, { state: 'failed' })).toBe(2);
+  });
+
+  it('adds the normalisation gain the preview applies, with its boost cap', () => {
+    expect(waveGain(normalized, { state: 'measured', lufs: -22 })).toBeCloseTo(2 * 10 ** (6 / 20), 6);
+    expect(waveGain(normalized, { state: 'measured', lufs: -60 })).toBeCloseTo(2 * 10, 6);
+    expect(waveGain(normalized, { state: 'measured', lufs: null })).toBe(2);
   });
 });
 

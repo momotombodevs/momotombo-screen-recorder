@@ -1,6 +1,7 @@
 import type { Project } from '@momotombo/project-model';
 import { TICKS_PER_SECOND } from '@momotombo/timing';
-import { api, type PeaksStamp } from '../api';
+import type { PeaksStamp } from '@momotombo/protocol';
+import { api } from '../api';
 import { AUDIO_KINDS, SAMPLE_RATE, type AudioKind, type DecodedAudio } from '../export/audio-mix';
 import { decodePeaks, emptyPeaks, encodePeaks, fillPeaks, peakDecodeRate, type Peaks } from './peaks';
 
@@ -20,6 +21,7 @@ const SLICE_MS = 8;
 const BUCKETS_PER_STEP = 200;
 const yieldToUi = () => new Promise<void>((r) => setTimeout(r, 0));
 const LOADING: PeaksState = { state: 'loading' };
+const FAILED: PeaksState = { state: 'failed' };
 
 export class WaveformPeaks {
   private states = new Map<string, PeaksState>();
@@ -39,8 +41,8 @@ export class WaveformPeaks {
     return () => this.listeners.delete(fn);
   }
 
-  update(project: Project): void {
-    for (const rec of Object.values(project.recordings)) {
+  update(recordings: Project['recordings']): void {
+    for (const rec of Object.values(recordings)) {
       for (const kind of AUDIO_KINDS) {
         const src = rec.sources[kind];
         if (!src || this.states.has(src.file)) continue;
@@ -80,12 +82,12 @@ export class WaveformPeaks {
       const decoded = await this.io.decode(job.file, peakDecodeRate(job.seconds, job.channels, this.budgetBytes));
       const peaks = await this.compute(decoded);
       this.io.release(job.file, job.kind);
-      if (!peaks) return LOADING;
+      if (!peaks || peaks.peak.length === 0) return FAILED;
       await this.io.write(job.file, cached.stamp, encodePeaks(peaks)).catch((err: unknown) => console.warn('Could not store waveform peaks', err));
       return { state: 'ready', peaks };
     } catch (err) {
       console.warn('Waveform peaks failed', job.file, err);
-      return { state: 'failed' };
+      return FAILED;
     }
   }
 

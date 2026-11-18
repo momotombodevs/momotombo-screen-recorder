@@ -3,6 +3,7 @@ import type { Project, SegmentPlacement } from '@momotombo/project-model';
 import { TICKS_PER_SECOND, secondsToTicks } from '@momotombo/timing';
 import { audioSlices, columnLevel, silentRanges, waveHeight, type Peaks } from '../../audio/peaks';
 import type { WaveformPeaks } from '../../audio/waveform-peaks';
+import { t } from '../../i18n';
 
 const SILENCE_LEVEL = 10 ** (-40 / 20);
 const SILENCE_MIN_SECONDS = 0.6;
@@ -11,6 +12,7 @@ const CLIP_MARK = 2;
 
 interface WaveInput {
   kind: 'mic' | 'system';
+  gain: number;
   project: Project;
   placements: SegmentPlacement[];
   pxPerSecond: number;
@@ -26,21 +28,32 @@ function silenceOf(memo: SilenceMemo, peaks: Peaks, level: number): [number, num
   return ranges;
 }
 
-function silenceHatch(ctx: CanvasRenderingContext2D, dpr: number, scrollLeft: number): CanvasPattern | null {
+const hatchTiles = new Map<number, HTMLCanvasElement>();
+
+function hatchTile(dpr: number): HTMLCanvasElement | null {
+  const cached = hatchTiles.get(dpr);
+  if (cached) return cached;
   const size = Math.round(6 * dpr);
   const tile = document.createElement('canvas');
   tile.width = size;
   tile.height = size;
-  const t = tile.getContext('2d');
-  if (!t) return null;
-  t.strokeStyle = 'rgba(255, 255, 255, 0.09)';
-  t.lineWidth = dpr;
-  t.beginPath();
-  t.moveTo(0, size);
-  t.lineTo(size, 0);
-  t.stroke();
+  const pen = tile.getContext('2d');
+  if (!pen) return null;
+  pen.strokeStyle = 'rgba(255, 255, 255, 0.09)';
+  pen.lineWidth = dpr;
+  pen.beginPath();
+  pen.moveTo(0, size);
+  pen.lineTo(size, 0);
+  pen.stroke();
+  hatchTiles.set(dpr, tile);
+  return tile;
+}
+
+function silenceHatch(ctx: CanvasRenderingContext2D, dpr: number, scrollLeft: number): CanvasPattern | null {
+  const tile = hatchTile(dpr);
+  if (!tile) return null;
   const pattern = ctx.createPattern(tile, 'repeat');
-  pattern?.setTransform(new DOMMatrix().translateSelf(-((scrollLeft * dpr) % size), 0));
+  pattern?.setTransform(new DOMMatrix().translateSelf(-((scrollLeft * dpr) % tile.width), 0));
   return pattern;
 }
 
@@ -60,11 +73,11 @@ function draw(canvas: HTMLCanvasElement, scroller: HTMLElement, labelWidth: numb
   if (!ctx) return;
   ctx.clearRect(0, 0, w, h);
 
-  const { kind, project, placements, pxPerSecond } = input;
+  const { kind, project, placements, pxPerSecond, gain } = input;
   const style = getComputedStyle(canvas);
   const audioRgb = style.getPropertyValue('--track-audio-rgb').trim() || '120, 200, 160';
   const clipColor = style.getPropertyValue('--danger').trim() || '#ff5a5f';
-  const { gain, muted } = project.audio[kind];
+  const { muted } = project.audio[kind];
   const left = scroller.scrollLeft;
   const visibleFrom = secondsToTicks(left / pxPerSecond);
   const visibleTo = secondsToTicks((left + cssW) / pxPerSecond);
@@ -82,6 +95,13 @@ function draw(canvas: HTMLCanvasElement, scroller: HTMLElement, labelWidth: numb
     const c1 = Math.min(w, toDevice(endSec) - 1);
     if (c1 <= c0) continue;
     const state = waveform.get(slice.file);
+    if (state.state === 'failed') {
+      ctx.fillStyle = `rgba(${audioRgb}, 0.7)`;
+      ctx.font = `${11 * dpr}px ${style.fontFamily}`;
+      ctx.textBaseline = 'middle';
+      ctx.fillText(t("Forma de onda no disponible"), c0 + 8 * dpr, mid, Math.max(0, c1 - c0 - 16 * dpr));
+      continue;
+    }
     if (state.state !== 'ready') {
       ctx.fillStyle = `rgba(${audioRgb}, 0.3)`;
       for (let c = c0; c < c1; c += 6 * dpr) ctx.fillRect(c, Math.round(mid), Math.min(3 * dpr, c1 - c), Math.max(1, Math.round(dpr)));
@@ -172,7 +192,7 @@ export function AudioWave({ waveform, scrollRef, labelWidth, ...input }: WaveInp
     };
   }, [waveform, scrollRef, labelWidth]);
 
-  useLayoutEffect(() => redraw.current(), [input.project, input.placements, input.pxPerSecond, input.kind, waveform]);
+  useLayoutEffect(() => redraw.current(), [input.project, input.placements, input.pxPerSecond, input.kind, input.gain, waveform]);
 
   return <canvas ref={canvasRef} className="tl-wave" aria-hidden="true" />;
 }

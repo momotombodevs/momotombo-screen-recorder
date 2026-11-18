@@ -1,4 +1,6 @@
-import type { Project, SegmentPlacement } from '@momotombo/project-model';
+import type { AudioChannel, Project, SegmentPlacement } from '@momotombo/project-model';
+import type { Loudness } from './measure';
+import { channelGain } from './voice-chain';
 import { TICKS_PER_SECOND, type Ticks } from '@momotombo/timing';
 
 export const BUCKETS_PER_SECOND = 100;
@@ -130,4 +132,8 @@ export function waveHeight(level: number, gain: number): number {
   const v = level * gain;
   if (v <= 0) return 0;
   return Math.max(0, Math.min(1, 1 + (20 * Math.log10(v)) / WAVE_RANGE_DB));
+}
+
+export function waveGain(channel: AudioChannel, loudness: Loudness): number {
+  return channelGain(channel, loudness.state === 'measured' ? loudness.lufs : null);
 }

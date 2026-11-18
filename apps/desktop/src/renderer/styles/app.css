@@ -2074,17 +2074,17 @@ h3 {
 
 .tl-marker {
   position: absolute;
-  top: 13px;
+  top: 9px;
   display: grid;
   place-items: center;
-  width: 17px;
-  height: 17px;
+  width: 24px;
+  height: 24px;
   padding: 0;
   border: 0;
   border-radius: 4px;
   background: transparent;
   color: var(--accent);
-  transform: translateX(-8px);
+  transform: translateX(-12px);
   cursor: pointer;
   z-index: 2;
 }

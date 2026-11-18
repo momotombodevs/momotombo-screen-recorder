@@ -35,7 +35,7 @@ function fakeIo(cached: Record<string, Uint8Array> = {}): PeaksIo & { written: M
 }
 
 async function loaded(w: WaveformPeaks, p: Project, file: string) {
-  w.update(p);
+  w.update(p.recordings);
   await vi.waitFor(() => expect(w.get(file).state).not.toBe('loading'));
   return w.get(file);
 }
@@ -58,7 +58,7 @@ describe('WaveformPeaks', () => {
     const p = addRecording(createProject('W'), recording(2));
     await loaded(w, p, 'media/r1/mic.m4a');
     await vi.waitFor(() => expect(w.get('media/r1/system.m4a').state).toBe('ready'));
-    w.update(p);
+    w.update(p.recordings);
     expect(io.decode).toHaveBeenCalledTimes(2);
     expect(io.decode).toHaveBeenCalledWith('media/r1/mic.m4a', 48_000);
     expect(io.write).toHaveBeenCalledWith('media/r1/mic.m4a', stamp, expect.any(Uint8Array));
@@ -72,6 +72,14 @@ describe('WaveformPeaks', () => {
     const w = new WaveformPeaks(io, 512 * 1024 * 1024);
     await loaded(w, addRecording(createProject('W'), recording(2 * 3600)), 'media/r1/mic.m4a');
     expect(io.decode).toHaveBeenCalledWith('media/r1/mic.m4a', 18_641);
+  });
+
+  it('marks a source whose audio decodes to nothing as unavailable instead of loading', async () => {
+    const io = fakeIo();
+    vi.mocked(io.decode).mockResolvedValueOnce({ sampleRate: 48_000, numberOfChannels: 1, getChannelData: () => new Float32Array(0) });
+    const w = new WaveformPeaks(io);
+    expect((await loaded(w, addRecording(createProject('W'), recording(1)), 'media/r1/mic.m4a')).state).toBe('failed');
+    expect(io.write).not.toHaveBeenCalledWith('media/r1/mic.m4a', expect.anything(), expect.anything());
   });
 
   it('marks a source it cannot read as failed and moves on to the next', async () => {
