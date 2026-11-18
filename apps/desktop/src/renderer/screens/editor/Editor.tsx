@@ -16,6 +16,7 @@ import { Settings } from '../Settings';
 import { shortcutsBlocked } from './editor-guards';
 import { ExportDialog } from './ExportDialog';
 import { Inspector } from './Inspector';
+import { adjacentMarker, markerTimes } from './markers';
 import { addMagnifierAt, addTextAt, place, placeRange } from './placement';
 import { Preview } from './Preview';
 import { Timeline } from './Timeline';
@@ -143,6 +144,12 @@ export function Editor({ opened, onBack, notice: initialNotice, onNoticeShown }:
         case 'm': case 'M': store.setTool(s.tool === 'magnifier' ? 'select' : 'magnifier'); break;
         case 't': case 'T': store.setTool(s.tool === 'text' ? 'select' : 'text'); break;
         case 'v': case 'V': case 'Escape': store.setTool('select'); if (e.key === 'Escape') store.select(null); break;
+        case '[': case ']': {
+          const to = adjacentMarker(markerTimes(s.project, layoutSegments(s.project)), s.playhead, e.key === ']' ? 1 : -1, fd / 2);
+          if (to === null) store.notify(t("No hay más marcas en esa dirección."));
+          else seekRef.current(to);
+          break;
+        }
         case '?': setHelp((h) => !h); break;
         case 'Delete': case 'Backspace': {
           const sel = s.selection;
@@ -338,7 +345,7 @@ function Timecode({ store }: { store: EditorStore }) {
 
 function ShortcutHelp({ onClose }: { onClose: () => void }) {
   const rows: [string, string][] = [
-    [t("Espacio"), t("Reproducir / pausar")], ['← →', t("Avanzar fotograma a fotograma (1 s con {key})", { key: keyLabel('shift') })], ['K', t("Cámara dinámica (mueve la cámara durante un intervalo)")], ['C', t("Modo de corte (haz clic con el mouse para cortar)")], ['S', t("Dividir en el cabezal de reproducción")],
+    [t("Espacio"), t("Reproducir / pausar")], ['← →', t("Avanzar fotograma a fotograma (1 s con {key})", { key: keyLabel('shift') })], ['K', t("Cámara dinámica (mueve la cámara durante un intervalo)")], ['C', t("Modo de corte (haz clic con el mouse para cortar)")], ['S', t("Dividir en el cabezal de reproducción")], ['[ ]', t("Ir a la marca anterior / siguiente")],
     ['Z', t("Herramienta de zoom")], ['M', t("Herramienta de lupa")], ['T', t("Herramienta de texto")], ['B', t("Herramienta de privacidad")], [t("V / Esc"), t("Herramienta de selección")], [t("Eliminar"), t("Eliminar el elemento seleccionado")],
     [`${keyLabel('mod+Z')} / ${redoLabel()}`, t("Deshacer / rehacer")], [keyLabel('mod+E'), t("Exportar")], [t("{key} + desplazar", { key: keyLabel('mod') }), t("Escala de la línea de tiempo")],
     [[RECORDING_KEYS.stop, RECORDING_KEYS.pause, RECORDING_KEYS.mark].map(keyLabel).join(' · '), t("Al grabar: finalizar · pausar · marca")],
