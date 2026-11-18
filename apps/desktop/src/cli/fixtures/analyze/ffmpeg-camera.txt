@@ -1,0 +1,38 @@
+[Parsed_metadata_4 @ 0x775ac06100] frame:0    pts:0       pts_time:0
+[Parsed_metadata_4 @ 0x775ac06100] lavfi.signalstats.YAVG=161.206
+[Parsed_metadata_4 @ 0x775ac06100] frame:1    pts:1       pts_time:1
+[Parsed_metadata_4 @ 0x775ac06100] lavfi.signalstats.YAVG=162.242
+[Parsed_metadata_4 @ 0x775ac06100] frame:2    pts:2       pts_time:2
+[Parsed_metadata_4 @ 0x775ac06100] lavfi.signalstats.YAVG=161.704
+[Parsed_metadata_4 @ 0x775ac06100] frame:3    pts:3       pts_time:3
+[Parsed_metadata_4 @ 0x775ac06100] lavfi.signalstats.YAVG=162.831
+[Parsed_metadata_4 @ 0x775ac06100] frame:4    pts:4       pts_time:4
+[Parsed_metadata_4 @ 0x775ac06100] lavfi.signalstats.YAVG=162.62
+[Parsed_metadata_4 @ 0x775ac06100] frame:5    pts:5       pts_time:5
+[Parsed_metadata_4 @ 0x775ac06100] lavfi.signalstats.YAVG=162.513
+[Parsed_metadata_4 @ 0x775ac06100] frame:6    pts:6       pts_time:6
+[Parsed_metadata_4 @ 0x775ac06100] lavfi.signalstats.YAVG=161.883
+[Parsed_metadata_4 @ 0x775ac06100] frame:7    pts:7       pts_time:7
+[Parsed_metadata_4 @ 0x775ac06100] lavfi.signalstats.YAVG=161.689
+[Parsed_metadata_4 @ 0x775ac06100] frame:8    pts:8       pts_time:8
+[Parsed_metadata_4 @ 0x775ac06100] lavfi.signalstats.YAVG=161.815
+[Parsed_metadata_4 @ 0x775ac06100] frame:9    pts:9       pts_time:9
+[Parsed_metadata_4 @ 0x775ac06100] lavfi.signalstats.YAVG=162.369
+[Parsed_metadata_4 @ 0x775ac06100] frame:10   pts:10      pts_time:10
+[Parsed_metadata_4 @ 0x775ac06100] lavfi.signalstats.YAVG=162.905
+[Parsed_metadata_4 @ 0x775ac06100] frame:11   pts:11      pts_time:11
+[Parsed_metadata_4 @ 0x775ac06100] lavfi.signalstats.YAVG=163.095
+[Parsed_metadata_4 @ 0x775ac06100] frame:12   pts:12      pts_time:12
+[Parsed_metadata_4 @ 0x775ac06100] lavfi.signalstats.YAVG=163.235
+[Parsed_metadata_4 @ 0x775ac06100] frame:13   pts:13      pts_time:13
+[Parsed_metadata_4 @ 0x775ac06100] lavfi.signalstats.YAVG=156.876
+[Parsed_metadata_4 @ 0x775ac06100] frame:14   pts:14      pts_time:14
+[Parsed_metadata_4 @ 0x775ac06100] lavfi.signalstats.YAVG=156.796
+[Parsed_metadata_4 @ 0x775ac06100] frame:15   pts:15      pts_time:15
+[Parsed_metadata_4 @ 0x775ac06100] lavfi.signalstats.YAVG=163.384
+[Parsed_metadata_4 @ 0x775ac06100] frame:16   pts:16      pts_time:16
+[Parsed_metadata_4 @ 0x775ac06100] lavfi.signalstats.YAVG=171.688
+[Parsed_metadata_4 @ 0x775ac06100] frame:17   pts:17      pts_time:17
+[Parsed_metadata_4 @ 0x775ac06100] lavfi.signalstats.YAVG=172.778
+[Parsed_metadata_4 @ 0x775ac06100] frame:18   pts:18      pts_time:18
+[Parsed_metadata_4 @ 0x775ac06100] lavfi.signalstats.YAVG=172.468

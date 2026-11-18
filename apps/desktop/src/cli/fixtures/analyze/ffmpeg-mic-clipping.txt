@@ -1,0 +1,20 @@
+[Parsed_silencedetect_2 @ 0x75c4c04fc0] silence_start: 3
+[Parsed_silencedetect_2 @ 0x75c4c04fc0] silence_end: 5.000042 | silence_duration: 2.000042
+[Parsed_ebur128_0 @ 0x75c4c04e40] Summary:
+  Integrated loudness:
+    I:          -3.9 LUFS
+    Threshold: -16.2 LUFS
+  Loudness range:
+    LRA:         9.8 LU
+    Threshold: -27.9 LUFS
+    LRA low:   -13.5 LUFS
+    LRA high:   -3.8 LUFS
+  True peak:
+    Peak:        0.1 dBFS
+[Parsed_astats_1 @ 0x75c4c04f00] Overall
+[Parsed_astats_1 @ 0x75c4c04f00] Peak level dB: 0.053849
+[Parsed_astats_1 @ 0x75c4c04f00] Peak count: 2.000000
+[Parsed_astats_1 @ 0x75c4c04f00] Noise floor dB: -inf
+[Parsed_astats_1 @ 0x75c4c04f00] Number of samples: 336000
+[out#0/null @ 0x75c4c04540] video:0KiB audio:656KiB subtitle:0KiB other streams:0KiB global headers:0KiB muxing overhead: unknown
+size=N/A time=00:00:07.00 bitrate=N/A speed= 329x elapsed=0:00:00.02    

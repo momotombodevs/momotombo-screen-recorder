@@ -22,6 +22,7 @@ import {
   validatedProjectText,
   writeProjectTextIfUnchanged,
 } from "../main/project-file";
+import { ToolsMissingError, analyzeProject } from "./analyze";
 import { OpError, applyOps, describeProject, parseOps, type Op } from "./ops";
 
 const USAGE = `momotombo-edit: edit Momotombo projects from the command line.
@@ -30,12 +31,14 @@ const USAGE = `momotombo-edit: edit Momotombo projects from the command line.
   describe <project>                timeline, items, style, variants and media files (times in seconds)
   apply <project> <ops.json | ->    apply a JSON array of ops; all or nothing
   open <project>                    open the project in the Momotombo editor
+  analyze <project>                 quality report (needs ffmpeg and ffprobe on PATH): findings, verdict, suggested ops
 
 <project> is "latest", a project id, or an exact project name.
 Options: --root <projects folder>   --dry-run (apply: validate and report, write nothing)
-Exit codes: 0 done, 1 usage or other error, 3 invalid ops or project, 4 the project changed while applying (nothing written)`;
+Exit codes: 0 done, 1 usage or other error, 3 invalid ops or project, 4 the project changed while applying (nothing written),
+            5 analyze needs ffmpeg and ffprobe on PATH`;
 
-export const EXIT = { ok: 0, usage: 1, invalid: 3, conflict: 4 } as const;
+export const EXIT = { ok: 0, usage: 1, invalid: 3, conflict: 4, toolsMissing: 5 } as const;
 
 class UsageError extends Error {}
 
@@ -219,7 +222,7 @@ async function main(argv: string[], io: Io): Promise<unknown> {
   const { values, positionals } = parsed;
   const [command, ref, opsFile] = positionals;
   if (values.help || !command) return USAGE;
-  if (!["list", "describe", "apply", "open"].includes(command))
+  if (!["list", "describe", "apply", "open", "analyze"].includes(command))
     throw new UsageError(`Unknown command "${command}".\n\n${USAGE}`);
   const root = projectsRoot(values.root, io.env);
   const found = await findProjects(root);
@@ -264,7 +267,11 @@ async function main(argv: string[], io: Io): Promise<unknown> {
         warnings,
       };
     }
-    default: {
+    case "analyze": {
+      const { dir, project } = pick(found, ref, root);
+      return analyzeProject(dir, project);
+    }
+    case "open": {
       if (values.root)
         throw new UsageError(
           "open shows the project in the app, which only reads its own projects folder; drop --root.",
@@ -273,11 +280,14 @@ async function main(argv: string[], io: Io): Promise<unknown> {
       const app = await openInApp(project.id, io.env);
       return { id: project.id, opened: true, app };
     }
+    default:
+      throw new UsageError(`Unknown command "${command}".\n\n${USAGE}`);
   }
 }
 
 function exitCode(e: unknown): number {
   if (e instanceof WriteConflictError) return EXIT.conflict;
+  if (e instanceof ToolsMissingError) return EXIT.toolsMissing;
   if (e instanceof OpError || e instanceof ProjectFormatError) return EXIT.invalid;
   return EXIT.usage;
 }
