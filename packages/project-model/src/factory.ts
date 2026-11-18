@@ -3,7 +3,7 @@ import { presetTransition } from './easing';
 import type {
   AudioChannel, AudioMix, Background, CameraLayout, ID, ItemBase, MagnifierStyle, PrivacyItem, Project, Recording, Segment, Style, TextItem, Variant,
 } from './types';
-import { SCHEMA_VERSION } from './types';
+import { MAX_AUDIO_GAIN, SCHEMA_VERSION } from './types';
 
 export function newId(prefix = ''): ID {
   const uuid = globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
@@ -51,6 +51,15 @@ export const MAGNIFIER_LIMITS = {
 export function defaultMagnifier(): MagnifierStyle {
   return { size: 280, zoom: 2, shape: 'circle', border: { width: 3, color: '#FFFFFF' }, hideWhenIdle: false };
 }
+
+/** Allowed ranges of the audio settings; the editor's sliders, playback, export and the CLI all use them. */
+export const AUDIO_LIMITS = {
+  gain: { min: 0, max: MAX_AUDIO_GAIN },
+  highpassHz: { min: 0, max: 1000 },
+  compressor: { thresholdDb: { min: -60, max: 0 }, ratio: { min: 1, max: 20 } },
+  gate: { thresholdDb: { min: -100, max: 0 } },
+  normalize: { targetLufs: { min: -40, max: -5 }, maxBoostDb: 20 },
+} as const;
 
 function plainChannel(gain: number): AudioChannel {
   return {

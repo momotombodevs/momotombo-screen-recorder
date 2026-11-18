@@ -3,7 +3,7 @@ import {
   BACKGROUND_PRESETS, DEFAULT_CAMERA_MOVE, DEFAULT_CAMERA_SPLIT, MAGNIFIER_LIMITS, activeVariant, addCameraMoveAt, setCameraMovePosition, layoutSegments, presetTransition, removeCameraLayout,
   removeMagnifier, removePrivacy, removeSegment, removeZoom, resolvedBaseCamera, resolvedFrameStyle, setAudio, setStyle, setSyncOffset,
   setZoomSensitivity, timelineToSource, updateCameraLayout, updateMagnifier, updatePrivacy, updateVariant, updateZoom,
-  MAX_AUDIO_GAIN, type AudioChannel, type Background, type CameraLayout, type CameraShape, type DeepPartial, type Easing, type MagnifierShape, type MagnifierStyle,
+  AUDIO_LIMITS, MAX_AUDIO_GAIN, type AudioChannel, type Background, type CameraLayout, type CameraShape, type DeepPartial, type Easing, type MagnifierShape, type MagnifierStyle,
   type PrivacyEffect, type Project, type Transition, type ZoomItem,
   pictureAspect,
 } from '@momotombo/project-model';
@@ -488,7 +488,7 @@ function VoiceEnhance({ store, player, mic }: { store: EditorStore; player: Play
       <Toggle label={t("Puerta de ruido")} hint={t("Silencia el ruido de fondo entre frases")} checked={mic.gate.enabled} onChange={(enabled) => set({ gate: { enabled } })} />
       {mic.gate.enabled && <Slider label={t("Umbral de la puerta")} value={mic.gate.thresholdDb} min={-80} max={-20} step={1} onChange={(thresholdDb) => set({ gate: { thresholdDb } }, 'mic-gate')} format={db} />}
       <Toggle label={t("Normalizar el volumen")} checked={n.enabled} onChange={(enabled) => set({ normalize: { enabled } })} />
-      {n.enabled && <Slider label={t("Volumen objetivo")} value={n.targetLufs} min={-30} max={-10} step={1} onChange={(targetLufs) => set({ normalize: { targetLufs } }, 'mic-lufs')} format={(v) => t("{n} LUFS", { n: v })} />}
+      {n.enabled && <Slider label={t("Volumen objetivo")} value={n.targetLufs} min={AUDIO_LIMITS.normalize.targetLufs.min} max={AUDIO_LIMITS.normalize.targetLufs.max} step={1} onChange={(targetLufs) => set({ normalize: { targetLufs } }, 'mic-lufs')} format={(v) => t("{n} LUFS", { n: v })} />}
       <p className="muted small" aria-live="polite">{loudnessNote(info.mic, n)}</p>
       {info.enhancementUnavailable && hasVoiceEnhance(mic) && (
         <p className="note"><Icon name="info" size={14} />{t("La vista previa suena sin la mejora de voz; la exportación sí la aplica.")}</p>

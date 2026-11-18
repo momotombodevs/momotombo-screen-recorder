@@ -4,6 +4,7 @@ import type { Project } from "./types";
 import { MAX_AUDIO_GAIN, SCHEMA_VERSION } from "./types";
 import {
   ProjectFormatError,
+  type FormatRule,
   isObj,
   validateAudio,
   validateCameraLayouts,
@@ -18,7 +19,7 @@ import {
   validateZooms,
 } from "./validate";
 
-export { ProjectFormatError };
+export { ProjectFormatError, type FormatRule };
 
 /**
  * Validates and normalizes a parsed project.json. Missing optional sections are filled
@@ -95,6 +96,21 @@ export function parseProject(json: unknown): Project {
     audio,
     zoomEngine,
   };
+}
+
+/** Checks a project that is already in memory, exactly as written: no defaults filled, nothing clamped. */
+export function validateProject(project: Project): void {
+  validateRecordings(project.recordings);
+  validateSequence(project.sequence, project.recordings);
+  validateVariants(project.variants);
+  validateStyle(project.style);
+  validateAudio(project.audio);
+  validateZoomEngine(project.zoomEngine);
+  validateZooms(project.zooms);
+  validateCameraLayouts(project.cameraLayouts);
+  validatePrivacy(project.privacy);
+  validateMagnifiers(project.magnifiers);
+  validateTexts(project.texts);
 }
 
 export function serializeProject(project: Project, now = new Date()): string {

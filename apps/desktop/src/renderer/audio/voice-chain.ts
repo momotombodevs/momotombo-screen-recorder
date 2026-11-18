@@ -1,4 +1,4 @@
-import type { AudioChannel, DeepPartial } from '@momotombo/project-model';
+import { AUDIO_LIMITS, type AudioChannel, type DeepPartial } from '@momotombo/project-model';
 
 export const VOICE_PRESET = {
   highpassHz: 80,
@@ -21,11 +21,10 @@ export function softLimit(v: number): number {
   return v < 0 ? -out : out;
 }
 
-export const MAX_NORMALIZE_DB = 20;
 
 export function normalizeGainDb(n: AudioChannel['normalize'], measuredLufs: number | null): number {
   if (!n.enabled || measuredLufs === null) return 0;
-  return Math.min(MAX_NORMALIZE_DB, n.targetLufs - measuredLufs);
+  return Math.min(AUDIO_LIMITS.normalize.maxBoostDb, n.targetLufs - measuredLufs);
 }
 
 export function channelGain(ch: AudioChannel, measuredLufs: number | null): number {

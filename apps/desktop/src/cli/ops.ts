@@ -5,8 +5,8 @@ import {
   removeSegment, removeTimelineRange, removeZoom, renameProject, resolveCamera, sequenceDuration, setActiveVariant, setAudio,
   setCameraMovePosition, setStyle, setZoomSensitivity, sourceToTimeline, splitAt, trimSegment, updateCameraLayout,
   updateMagnifier, updatePrivacy, updateTextLook, updateVariant, updateZoom, removeText,
-  TEXT_ALIGNS, TEXT_ANCHORS, TEXT_ANIMATION_KINDS, TEXT_LIMITS, TEXT_PRESETS, TEXT_PRESET_IDS, TEXT_WEIGHTS,
-  type AudioMix, type Background, type CameraLayout, type CameraShape, type CursorTrack, type DeepPartial, type ItemBase, type PlaceResult,
+  ProjectFormatError, TEXT_ALIGNS, TEXT_ANCHORS, validateProject, TEXT_ANIMATION_KINDS, TEXT_LIMITS, TEXT_PRESETS, TEXT_PRESET_IDS, TEXT_WEIGHTS,
+  type AudioMix, type Background, type FormatRule, type CameraLayout, type CameraShape, type CursorTrack, type DeepPartial, type ItemBase, type PlaceResult,
   type Project, type Rect, type Style, type TextAnimation, type TextItem, type TextLookPatch, type TrackItem, type TrackKey, type Variant, type Vec2,
 } from '@momotombo/project-model';
 import { secondsToTicks, ticksToSeconds, type Ticks } from '@momotombo/timing';
@@ -447,6 +447,37 @@ export interface Applied {
   warnings: string[];
 }
 
+const TYPE_EN: Record<Extract<FormatRule, { kind: 'type' }>['expected'], string> = {
+  number: 'must be a finite number', integer: 'must be a whole number', text: 'must be text', boolean: 'must be true or false',
+  list: 'must be a list', object: 'must be an object', color: 'must be a #rrggbb color',
+};
+
+function englishReason(rule: FormatRule): string {
+  switch (rule.kind) {
+    case 'type': return TYPE_EN[rule.expected];
+    case 'min': return `must be ≥ ${rule.limit}`;
+    case 'max': return `must be ≤ ${rule.limit}`;
+    case 'above': return `must be > ${rule.limit}`;
+    case 'oneOf': return `must be one of ${rule.values.join(' | ')}`;
+    case 'fps': return `must be between ${rule.min} and ${rule.max} frames per second`;
+    case 'order': return `${rule.later} must be after ${rule.earlier}`;
+    case 'missingRecording': return 'names a recording that does not exist';
+    case 'count': return `must have ${rule.count} items`;
+    case 'empty': return 'must not be empty';
+    case 'tooLong': return `must be at most ${rule.limit} characters`;
+  }
+}
+
+export function formatProblem(e: ProjectFormatError): string {
+  return e.field && e.rule ? `${e.field} ${englishReason(e.rule)}` : e.message;
+}
+
+function checkedStep(p: Project, op: Op, ctx: OpContext): Step {
+  const step = applyOp(p, op, ctx);
+  if (step.project !== p) validateProject(step.project);
+  return step;
+}
+
 export function applyOps(project: Project, ops: readonly Op[], ctx: OpContext = {}): Applied {
   const results: OpResult[] = [];
   const warnings: string[] = [];
@@ -454,9 +485,9 @@ export function applyOps(project: Project, ops: readonly Op[], ctx: OpContext = 
     const where = `op ${index} (${op.op})`;
     let step: Step;
     try {
-      step = applyOp(p, op, ctx);
+      step = checkedStep(p, op, ctx);
     } catch (e) {
-      throw new OpError(`${where}: ${(e as Error).message}`);
+      throw new OpError(`${where}: ${e instanceof ProjectFormatError ? formatProblem(e) : (e as Error).message}`);
     }
     if (step.project === p) throw new OpError(`${where}: changed nothing (time outside the timeline, unknown id, or already applied)`);
     const result: OpResult = { index, op: op.op, ...step.note };

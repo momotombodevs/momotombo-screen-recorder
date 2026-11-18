@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { readFile, stat } from 'node:fs/promises';
-import { MAX_AUDIO_GAIN, layoutSegments, parseCursorLog, sequenceDuration, type Project, type Recording, type SourceKind } from '@momotombo/project-model';
+import { AUDIO_LIMITS, MAX_AUDIO_GAIN, layoutSegments, parseCursorLog, sequenceDuration, type Project, type Recording, type SourceKind } from '@momotombo/project-model';
 import { secondsToTicks, ticksToSeconds } from '@momotombo/timing';
 import { safeJoin } from '../main/fsutil';
 import type { Op } from './ops';
@@ -23,7 +23,6 @@ export const DEAD_TIME_WARNING_SECONDS = 8;
 export const DEAD_TIME_WARNING_SHARE = 0.15;
 export const TARGET_LUFS = -16;
 export const MAX_TRUE_PEAK_DBTP = -1;
-export const NORMALIZE_MAX_BOOST_DB = 30;
 export const VOICE_HIGHPASS_HZ = 80;
 export const LEVEL_CHANGE_MIN_DB = 1;
 export const EBUR128_SILENT_LUFS = -70;
@@ -49,7 +48,7 @@ const THRESHOLDS = {
   silenceBelowLoudnessDb: SILENCE_BELOW_LOUDNESS_DB, silenceAboveNoiseDb: SILENCE_ABOVE_NOISE_DB, silenceThresholdMaxDb: SILENCE_THRESHOLD_MAX_DB,
   silenceMinSeconds: SILENCE_MIN_SECONDS, blackMinSeconds: BLACK_MIN_SECONDS, blackPixelThreshold: BLACK_PIXEL_THRESHOLD, freezeNoiseDb: FREEZE_NOISE_DB,
   freezeMinSeconds: FREEZE_MIN_SECONDS, cursorIdleSeconds: CURSOR_IDLE_SECONDS, deadTimeCutSeconds: DEAD_TIME_CUT_SECONDS, cutPaddingSeconds: CUT_PADDING_SECONDS,
-  targetLufs: TARGET_LUFS, maxTruePeakDbtp: MAX_TRUE_PEAK_DBTP, micGainMax: MAX_AUDIO_GAIN, micNoVoiceMarginDb: MIC_NO_VOICE_MARGIN_DB, normalizeMaxBoostDb: NORMALIZE_MAX_BOOST_DB,
+  targetLufs: TARGET_LUFS, maxTruePeakDbtp: MAX_TRUE_PEAK_DBTP, micGainMax: MAX_AUDIO_GAIN, micNoVoiceMarginDb: MIC_NO_VOICE_MARGIN_DB, normalizeMaxBoostDb: AUDIO_LIMITS.normalize.maxBoostDb,
   micQuietLufs: MIC_QUIET_LUFS, micMinSnrDb: MIC_MIN_SNR_DB, micNoisySnrDb: MIC_NOISY_SNR_DB, cameraDarkYavg: CAMERA_DARK_YAVG,
   minScreenHeight: MIN_SCREEN_HEIGHT, minFps: MIN_FPS,
 };
@@ -356,13 +355,13 @@ export function micLevelSuggestion(project: Project, recordings: RecordingAnalys
   if (channel.normalize && typeof channel.highpassHz === 'number') {
     const targetLufs = channel.normalize.targetLufs;
     const neededDb = targetLufs - measuredLufs;
-    const capped = neededDb > NORMALIZE_MAX_BOOST_DB;
+    const capped = neededDb > AUDIO_LIMITS.normalize.maxBoostDb;
     const done = channel.normalize.enabled && channel.highpassHz > 0;
     return {
       method: 'normalize', currentGain, measuredLufs, targetLufs,
       neededGain: round(10 ** (neededDb / 20), 2),
       suggestedGain: null,
-      expectedLufs: round(capped ? measuredLufs + NORMALIZE_MAX_BOOST_DB : targetLufs, 1),
+      expectedLufs: round(capped ? measuredLufs + AUDIO_LIMITS.normalize.maxBoostDb : targetLufs, 1),
       limitedBy: capped ? 'max-normalize' : null,
       withheldBy,
       op: unless(done || Math.abs(neededDb) < LEVEL_CHANGE_MIN_DB ? null : { op: 'setAudio', patch: { mic: { highpassHz: VOICE_HIGHPASS_HZ, normalize: { enabled: true } } } }),
@@ -442,8 +441,8 @@ export function findingsFor(rec: RecordingAnalysis): Finding[] {
         quiet ? 'Move much closer to the microphone and raise its input level; a boost this large in the edit makes the noise as loud as the voice.' : 'Record in a quieter room: close windows, turn off fans or AC, and close noisy apps.');
     else {
       if (quiet)
-        add(boostDb > NORMALIZE_MAX_BOOST_DB ? 'blocker' : 'warning', 'MIC_TOO_QUIET',
-          `The voice is quiet (${lufs} LUFS; aim for about ${TARGET_LUFS}). ${boostDb > NORMALIZE_MAX_BOOST_DB ? 'It needs more boost than the editor can give.' : 'Normalizing it in the edit is enough.'}`, level,
+        add(boostDb > AUDIO_LIMITS.normalize.maxBoostDb ? 'blocker' : 'warning', 'MIC_TOO_QUIET',
+          `The voice is quiet (${lufs} LUFS; aim for about ${TARGET_LUFS}). ${boostDb > AUDIO_LIMITS.normalize.maxBoostDb ? 'It needs more boost than the editor can give.' : 'Normalizing it in the edit is enough.'}`, level,
           'Move closer to the microphone or raise its input level for the next take.');
       if (snrDb !== null && snrDb < MIC_NOISY_SNR_DB)
         add('warning', 'MIC_NOISY', `The room noise is noticeable: the voice is ${snrDb} dB above it.`, level,
