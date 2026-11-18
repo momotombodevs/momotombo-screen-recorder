@@ -4,10 +4,10 @@ import {
   newCameraMoveLayout, pictureAspect, placeItem, privacyBounds, presetTransition, removeCameraLayout, removeMagnifier, removePrivacy,
   removeSegment, removeTimelineRange, removeZoom, renameProject, resolveCamera, sequenceDuration, setActiveVariant, setAudio,
   setCameraMovePosition, setStyle, setZoomSensitivity, sourceToTimeline, splitAt, trimSegment, updateCameraLayout,
-  updateMagnifier, updatePrivacy, updateText, updateVariant, updateZoom, removeText,
+  updateMagnifier, updatePrivacy, updateTextLook, updateVariant, updateZoom, removeText,
   TEXT_ALIGNS, TEXT_ANCHORS, TEXT_ANIMATION_KINDS, TEXT_LIMITS, TEXT_PRESETS, TEXT_PRESET_IDS, TEXT_WEIGHTS,
   type AudioMix, type Background, type CameraLayout, type CameraShape, type CursorTrack, type DeepPartial, type ItemBase, type PlaceResult,
-  type Project, type Rect, type Style, type TextAnimation, type TextItem, type TrackItem, type TrackKey, type Variant, type Vec2,
+  type Project, type Rect, type Style, type TextAnimation, type TextItem, type TextLookPatch, type TrackItem, type TrackKey, type Variant, type Vec2,
 } from '@momotombo/project-model';
 import { secondsToTicks, ticksToSeconds, type Ticks } from '@momotombo/timing';
 import { ENGINE_VERSION, suggestZooms, whyNoSuggestions } from '@momotombo/zoom-engine';
@@ -174,20 +174,12 @@ function patchText(p: Project, item: TextItem, raw: Obj): Project {
   if (locked.length) throw new OpError(`${locked.map((k) => `texts.${k}`).join(', ')} cannot be changed with a patch`);
   const parsed = TextPatch.safeParse(raw);
   if (!parsed.success) throw new OpError(parsed.error.issues.map((i) => `texts.${i.path.join('.')}: ${i.message}`).join('; '));
-  const { enter, exit, background, stroke, shadow, ...rest } = parsed.data;
-  let next = updateText(p, item.id, { ...rest, enter: toTicks(enter), exit: toTicks(exit) } as DeepPartial<TextItem>);
-  const optional = { background, stroke, shadow };
+  const { enter, exit, ...look } = parsed.data;
+  const next = updateTextLook(p, item.id, { ...look, enter: toTicks(enter), exit: toTicks(exit) } as TextLookPatch);
+  const patched = findItem(next, 'texts', item.id) as TextItem;
   for (const key of Object.keys(OPTIONAL_LOOK) as (keyof typeof OPTIONAL_LOOK)[]) {
-    const value = optional[key];
-    if (value === undefined) continue;
-    next = { ...next, texts: next.texts.map((x) => {
-      if (x.id !== item.id) return x;
-      if (value === null) { const { [key]: _gone, ...kept } = x; return kept as TextItem; }
-      const merged = { ...x[key], ...value };
-      const full = OPTIONAL_LOOK[key].safeParse(merged);
-      if (!full.success) throw new OpError(`texts.${key} is not set on this text yet; give all of ${Object.keys(OPTIONAL_LOOK[key].shape).join(', ')}`);
-      return { ...x, [key]: full.data };
-    }) };
+    if (patched[key] && !OPTIONAL_LOOK[key].safeParse(patched[key]).success)
+      throw new OpError(`texts.${key} is not set on this text yet; give all of ${Object.keys(OPTIONAL_LOOK[key].shape).join(', ')}`);
   }
   return next;
 }
@@ -382,16 +374,11 @@ function applyOp(p: Project, op: Op, ctx: OpContext): Step {
     case 'addText': {
       const { op: _op, start, end, preset, text, background, stroke, shadow, enter, exit, ...look } = op;
       const base = TEXT_PRESETS[preset ?? 'title'];
-      const item = {
+      const step = placed(placeItem(p, 'texts', {
         ...freeRange(p, 'texts', op), ...base, ...look, text, fontWeight: (look.fontWeight ?? base.fontWeight) as TextItem['fontWeight'],
         ...(enter ? { enter: toTicks(enter) as TextAnimation } : {}), ...(exit ? { exit: toTicks(exit) as TextAnimation } : {}),
-      };
-      const optional = { background, stroke, shadow };
-      for (const key of Object.keys(OPTIONAL_LOOK) as (keyof typeof OPTIONAL_LOOK)[]) {
-        if (optional[key] === null) delete item[key];
-        else if (optional[key]) Object.assign(item, { [key]: optional[key] });
-      }
-      return placed(placeItem(p, 'texts', item), 'texts', { start, end });
+      }), 'texts', { start, end });
+      return { ...step, project: updateTextLook(step.project, step.added!.id, { background, stroke, shadow }) };
     }
     case 'addCameraLayout': {
       const base = newCameraMoveLayout(p);
