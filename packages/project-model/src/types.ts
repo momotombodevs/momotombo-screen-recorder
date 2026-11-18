@@ -237,9 +237,26 @@ export interface Variant {
   zoomStrength?: number;
 }
 
+export interface AudioChannel {
+  gain: number;
+  muted: boolean;
+  /** Cutoff of a 12 dB/octave high-pass filter; 0 is off. */
+  highpassHz: number;
+  compressor: { enabled: boolean; thresholdDb: number; ratio: number };
+  gate: { enabled: boolean; thresholdDb: number };
+  /**
+   * Brings the channel's integrated loudness (ITU-R BS.1770, after filter, gate and
+   * compressor, before gain) to targetLufs. measuredLufs caches that loudness for the
+   * preview; null means not measured yet or nothing measurable.
+   */
+  normalize: { enabled: boolean; targetLufs: number; measuredLufs: number | null };
+}
+
+export const MAX_AUDIO_GAIN = 3;
+
 export interface AudioMix {
-  mic: { gain: number; muted: boolean };
-  system: { gain: number; muted: boolean };
+  mic: AudioChannel;
+  system: AudioChannel;
 }
 
 export type ZoomSensitivity = 'low' | 'medium' | 'high';

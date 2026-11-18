@@ -1,7 +1,7 @@
 import { FPS_30, secondsToTicks } from '@momotombo/timing';
 import { presetTransition } from './easing';
 import type {
-  Background, CameraLayout, ID, MagnifierStyle, PrivacyItem, Project, Recording, Segment, Style, Variant,
+  AudioChannel, AudioMix, Background, CameraLayout, ID, MagnifierStyle, PrivacyItem, Project, Recording, Segment, Style, Variant,
 } from './types';
 import { SCHEMA_VERSION } from './types';
 
@@ -50,6 +50,22 @@ export const MAGNIFIER_LIMITS = {
 
 export function defaultMagnifier(): MagnifierStyle {
   return { size: 280, zoom: 2, shape: 'circle', border: { width: 3, color: '#FFFFFF' }, hideWhenIdle: false };
+}
+
+function plainChannel(gain: number): AudioChannel {
+  return {
+    gain,
+    muted: false,
+    highpassHz: 0,
+    compressor: { enabled: false, thresholdDb: -24, ratio: 3 },
+    gate: { enabled: false, thresholdDb: -50 },
+    normalize: { enabled: false, targetLufs: -16, measuredLufs: null },
+  };
+}
+
+/** Every enhancement off: the mix sounds exactly as files from before enhancement existed. */
+export function defaultAudio(): AudioMix {
+  return { mic: plainChannel(1), system: plainChannel(0.8) };
 }
 
 export function defaultStyle(): Style {
@@ -108,7 +124,7 @@ export function createProject(name: string, now = new Date()): Project {
     style: defaultStyle(),
     variants: defaultVariants(),
     activeVariantId: 'v_16x9',
-    audio: { mic: { gain: 1, muted: false }, system: { gain: 0.8, muted: false } },
+    audio: defaultAudio(),
     zoomEngine: { sensitivity: 'medium' },
   };
 }

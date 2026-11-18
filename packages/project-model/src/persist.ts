@@ -1,7 +1,7 @@
 import { deepMerge, type DeepPartial } from "./commands";
-import { defaultStyle, defaultVariants } from "./factory";
+import { defaultAudio, defaultStyle, defaultVariants } from "./factory";
 import type { Project } from "./types";
-import { SCHEMA_VERSION } from "./types";
+import { MAX_AUDIO_GAIN, SCHEMA_VERSION } from "./types";
 import {
   ProjectFormatError,
   isObj,
@@ -58,9 +58,11 @@ export function parseProject(json: unknown): Project {
   );
   validateStyle(style);
   const audio = deepMerge<Project["audio"]>(
-    { mic: { gain: 1, muted: false }, system: { gain: 0.8, muted: false } },
+    defaultAudio(),
     (isObj(json.audio) ? json.audio : {}) as DeepPartial<Project["audio"]>,
   );
+  for (const ch of [audio.mic, audio.system])
+    if (isObj(ch) && typeof ch.gain === "number") ch.gain = Math.min(ch.gain, MAX_AUDIO_GAIN);
   validateAudio(audio);
   const zoomEngine = isObj(json.zoomEngine)
     ? json.zoomEngine
