@@ -23,11 +23,14 @@ function HudMeter() {
   const label = m.silent ? t("El micrófono no capta sonido") : m.clipping ? t("El micrófono se satura") : t("Nivel del micrófono");
   return (
     <span className={`level-wrap${m.silent ? ' is-silent' : ''}${m.clipping ? ' is-clipping' : ''}`} title={label}>
-      <span className="level" role="img" aria-label={label}>
+      <span className="level" ref={m.bar} role="meter" aria-label={t("Nivel del micrófono")} aria-valuemin={-60} aria-valuemax={0} aria-valuenow={-60}>
         <span className="level-fill" ref={m.fill} />
         <span className="level-hold" ref={m.hold} />
       </span>
-      {m.silent && <span className="hud-badge is-warning">{t("Sin sonido")}</span>}
+      <span role="status" className="level-status">
+        {m.clipping && <span className="hud-badge is-danger" title={label}>{t("SAT")}</span>}
+        {m.silent && <span className="hud-badge is-warning" title={label}>{t("Sin sonido")}</span>}
+      </span>
     </span>
   );
 }

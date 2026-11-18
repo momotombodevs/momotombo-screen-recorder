@@ -332,6 +332,7 @@ export class CaptureManager extends EventEmitter {
       if (!live()) return void this.releaseStale(backend);
       this.elapsedBase = 0;
       this.runningSince = Date.now();
+      this.peakSinceTick = 0;
       this.set({ phase: "recording", countdown: 0, message: undefined });
       this.emit("recordingStarted", config.target.kind);
       this.statusTimer = setInterval(() => void this.tick(), 250);

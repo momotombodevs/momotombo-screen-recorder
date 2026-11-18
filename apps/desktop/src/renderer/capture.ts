@@ -5,7 +5,7 @@
  */
 import type { CaptureConfig } from '@momotombo/protocol';
 import { acquire, warmUpCamera } from './capture-devices';
-import { measure } from './mic-meter';
+import { measure, windowCovering } from './mic-meter';
 import { micConstraints } from './recorder-inputs';
 import { webVideoBitrate } from '../shared/recording-budget';
 import { initI18n, t } from './i18n';
@@ -198,7 +198,7 @@ bridge.on('cw:prepare', async (raw) => {
       items.push(['mic', mic]);
       audioCtx = held.closeLater(new AudioContext());
       const an = audioCtx.createAnalyser();
-      an.fftSize = 8192;
+      an.fftSize = windowCovering(audioCtx.sampleRate, 120);
       audioCtx.createMediaStreamSource(mic).connect(an);
       const buf = new Float32Array(an.fftSize);
       levelTimer = held.interval(window.setInterval(() => {

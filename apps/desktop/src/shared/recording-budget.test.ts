@@ -45,9 +45,10 @@ describe('diskBudget', () => {
     expect(diskBudget(100 * MB, bps)).toEqual({ level: 'insufficient', minutesLeft: 0 });
   });
 
-  it('stops later for light recordings and earlier for heavy ones', () => {
-    expect(stopBelowBytes(1 * MB)).toBeLessThan(stopBelowBytes(10 * MB));
+  it('never stops later than 1.5 GiB before the disk is full, and earlier for heavy takes', () => {
+    expect(stopBelowBytes(0.5 * MB)).toBe(1.5 * GB);
+    expect(stopBelowBytes(1 * MB)).toBe(1.5 * GB);
     expect(stopBelowBytes(20 * MB)).toBeGreaterThan(1.5 * GB);
-    expect(stopBelowBytes(0.5 * MB)).toBeLessThan(1.5 * GB);
+    expect(stopBelowBytes(20 * MB)).toBeLessThan(stopBelowBytes(30 * MB));
   });
 });

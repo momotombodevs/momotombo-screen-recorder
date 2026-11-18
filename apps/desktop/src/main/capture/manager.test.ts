@@ -274,12 +274,40 @@ describe("CaptureManager: disk space", () => {
     expect(backend.stop).toHaveBeenCalled();
   });
 
-  it("keeps recording a light take that a fixed 1.5 GB threshold would have stopped", async () => {
-    const { m, backend } = setup({ diskFree: async () => 1.4 * GB });
+  it("stops a light take by 1.5 GB free at the latest", async () => {
+    let free = 100 * GB;
+    const { m, backend } = setup({ diskFree: async () => free });
     await m.start(config({ quality: "standard", fps: 30 }));
+    free = 1.45 * GB;
     await sleep(300);
-    expect(backend.stop).not.toHaveBeenCalled();
+    expect(backend.stop).toHaveBeenCalled();
+  });
+});
+
+describe("CaptureManager: microphone peak", () => {
+  const GB = 1024 ** 3;
+
+  it("does not carry a countdown peak into the recording", async () => {
+    const { m, b, backend } = setup({ diskFree: async () => 100 * GB });
+    const prep = deferred();
+    backend.prepare.mockReturnValueOnce(prep.promise);
+    const p = m.start(config({ countdown: 1 }));
+    await sleep(20);
+    b.emit("level", 0.5, 1);
+    prep.resolve();
+    await p;
+    await sleep(300);
     expect(m.state.phase).toBe("recording");
+    expect(m.state.micPeak).toBe(0);
+  });
+
+  it("reports the loudest sample between two updates while recording", async () => {
+    const { m, b } = setup({ diskFree: async () => 100 * GB });
+    await m.start(config());
+    b.emit("level", 0.1, 0.9);
+    b.emit("level", 0.1, 0.3);
+    await sleep(300);
+    expect(m.state.micPeak).toBe(0.9);
   });
 });
 

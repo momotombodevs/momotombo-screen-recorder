@@ -29,6 +29,7 @@ export interface DiskEstimate {
 const AUDIO_BPS = 160_000;
 const MIB = 1024 ** 2;
 const FINISH_RESERVE_BYTES = 512 * MIB;
+const MIN_STOP_BYTES = 1536 * MIB;
 const FINISH_RESERVE_SECONDS = 60;
 const MIN_START_MINUTES = 2;
 const COMFORTABLE_MINUTES = 15;
@@ -64,7 +65,7 @@ export function recordingBytesPerSecond(i: BudgetInput): number {
 
 /** Below this much free space a running recording stops, leaving room to close its files. */
 export function stopBelowBytes(bytesPerSecond: number): number {
-  return FINISH_RESERVE_BYTES + FINISH_RESERVE_SECONDS * bytesPerSecond;
+  return Math.max(MIN_STOP_BYTES, FINISH_RESERVE_BYTES + FINISH_RESERVE_SECONDS * bytesPerSecond);
 }
 
 export function minutesLeft(freeBytes: number, bytesPerSecond: number): number {

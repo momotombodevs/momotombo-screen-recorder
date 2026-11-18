@@ -52,8 +52,9 @@ export function NewRecording(props: { initialKind?: Kind; onBack: () => void; on
   const streams = useRef<MediaStream[]>([]);
   const p = prefs ?? DEFAULT_RECORDER_PREFS;
   const { cameraOn, micOn, systemAudio, fps, quality, countdown } = p;
-  const cams = useDevices('videoinput', !!prefs && cameraOn);
-  const mics = useDevices('audioinput', !!prefs && micOn);
+  const prefsLoaded = prefs !== null;
+  const cams = useDevices('videoinput', prefsLoaded && cameraOn);
+  const mics = useDevices('audioinput', prefsLoaded && micOn);
   const cameraId = resolveDeviceId(cams.devices, p.cameraDeviceId);
   const micId = resolveDeviceId(mics.devices, p.micDeviceId);
 
@@ -108,7 +109,7 @@ export function NewRecording(props: { initialKind?: Kind; onBack: () => void; on
 
   // Camera preview (released before recording so the capture backend can open the device).
   useEffect(() => {
-    if (!prefs || !cameraOn) return;
+    if (!prefsLoaded || !cameraOn) return;
     let stream: MediaStream | null = null;
     let cancelled = false;
     setCamState('opening');
@@ -131,11 +132,11 @@ export function NewRecording(props: { initialKind?: Kind; onBack: () => void; on
         if (f.permission) setPerms((p) => (p ? { ...p, camera: 'denied' } : p));
       });
     return () => { cancelled = true; stream?.getTracks().forEach((t) => t.stop()); };
-  }, [!!prefs, cameraOn, cameraId]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [prefsLoaded, cameraOn, cameraId, cams.refresh]);
 
   // Opened exactly as the recording opens it, so the meter shows the level that gets recorded.
   useEffect(() => {
-    if (!prefs || !micOn) return;
+    if (!prefsLoaded || !micOn) return;
     let stream: MediaStream | null = null;
     let cancelled = false;
     setMicState('opening');
@@ -154,7 +155,7 @@ export function NewRecording(props: { initialKind?: Kind; onBack: () => void; on
       if (openFailure(e).permission) setPerms((p) => (p ? { ...p, microphone: 'denied' } : p));
     });
     return () => { cancelled = true; setMicStream(null); stream?.getTracks().forEach((t) => t.stop()); };
-  }, [!!prefs, micOn, micId]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [prefsLoaded, micOn, micId, mics.refresh]);
 
   const native = backends.find((b) => b.id === 'native-macos' || b.id === 'native-windows');
   const effective = backend === 'web' || (backend === 'auto' && !native?.available) ? backends.find((b) => b.id === 'web') : native;
@@ -184,13 +185,14 @@ export function NewRecording(props: { initialKind?: Kind; onBack: () => void; on
 
   const estimateKey = config && JSON.stringify({ ...config, cameraLabel: null, micLabel: null, countdown: 0 });
   useEffect(() => {
-    if (!config) return;
+    if (!estimateKey) return;
+    const estimated = JSON.parse(estimateKey) as CaptureConfig;
     let live = true;
-    const run = () => void api.diskEstimate(config).then((d) => { if (live) setDisk(d); }, () => undefined);
+    const run = () => void api.diskEstimate(estimated).then((d) => { if (live) setDisk(d); }, () => undefined);
     run();
     const timer = window.setInterval(run, 30_000);
     return () => { live = false; window.clearInterval(timer); };
-  }, [estimateKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [estimateKey]);
 
   const start = async () => {
     if (!config) return;
@@ -363,11 +365,12 @@ function MicLevel(props: { stream: MediaStream }) {
   return (
     <>
       <div className="meter-row">
-        <div className="meter" role="img" aria-label={t("Nivel del micrófono")}>
+        <span className="meter" ref={m.bar} role="meter" aria-label={t("Nivel del micrófono")} aria-valuemin={-60} aria-valuemax={0} aria-valuenow={-60}>
           <span className="meter-fill" ref={m.fill} />
           <span className="meter-hold" ref={m.hold} />
-        </div>
-        <span className={`meter-clip${m.clipping ? ' is-on' : ''}`} title={t("Saturación: el sonido llega al máximo y se distorsiona. Aleja el micrófono o baja su volumen.")}>{t("SAT")}</span>
+        </span>
+        <span className={`meter-clip${m.clipping ? ' is-on' : ''}`} title={t("Saturación: el sonido llega al máximo y se distorsiona. Aleja el micrófono o baja su volumen.")} aria-hidden="true">{t("SAT")}</span>
+        <span className="sr-only" role="status">{m.clipping ? t("Saturación: el sonido llega al máximo y se distorsiona. Aleja el micrófono o baja su volumen.") : ''}</span>
       </div>
       <div className="meter-scale mono" aria-hidden="true"><span>-60</span><span>-40</span><span>-20</span><span>0 dB</span></div>
       {m.silent && <p className="note is-warning" role="status"><Icon name="warning" size={14} />{t("El micrófono no capta sonido. Revisa que no esté silenciado o elige otro dispositivo.")}</p>}

@@ -22,6 +22,8 @@ const HOLD_FALL_DB_PER_S = 20;
 const CLIP_SHOW_MS = 2000;
 const SILENT_DB = -60;
 const SILENT_AFTER_MS = 5000;
+const SOUND_BACK_DB = -54;
+const SOUND_BACK_AFTER_MS = 500;
 
 export function measure(samples: Float32Array): MeterReading {
   let sum = 0;
@@ -48,6 +50,8 @@ export class MicMeter {
   private holdAt = 0;
   private clipAt = -Infinity;
   private quietSince: number | null = null;
+  private loudSince: number | null = null;
+  private silent = false;
 
   push(r: MeterReading, now: number): MeterView {
     const db = toDbfs(r.rms);
@@ -59,14 +63,54 @@ export class MicMeter {
     }
     const holdDb = Math.max(peakDb, fallen);
     if (r.peak >= CLIP_LINEAR) this.clipAt = now;
-    if (db >= SILENT_DB) this.quietSince = null;
-    else this.quietSince ??= now;
+    if (!this.silent) {
+      if (db >= SILENT_DB) this.quietSince = null;
+      else this.quietSince ??= now;
+      this.silent = this.quietSince !== null && now - this.quietSince >= SILENT_AFTER_MS;
+    } else {
+      if (db < SOUND_BACK_DB) this.loudSince = null;
+      else this.loudSince ??= now;
+      if (this.loudSince !== null && now - this.loudSince >= SOUND_BACK_AFTER_MS) {
+        this.silent = false;
+        this.quietSince = null;
+        this.loudSince = null;
+      }
+    }
     return {
       level: meterFraction(db),
       hold: meterFraction(holdDb),
       db,
       clipping: now - this.clipAt < CLIP_SHOW_MS,
-      silent: this.quietSince !== null && now - this.quietSince >= SILENT_AFTER_MS,
+      silent: this.silent,
     };
   }
+}
+
+/** The smallest analyser window that holds every sample between two reads. */
+export function windowCovering(sampleRate: number, intervalMs: number): number {
+  return Math.min(32768, 2 ** Math.ceil(Math.log2((sampleRate * intervalMs) / 1000)));
+}
+
+export interface MeterElements {
+  fill: { style: { clipPath: string } } | null;
+  hold: { style: { left: string } } | null;
+  bar: { setAttribute(name: string, value: string): void } | null;
+}
+
+export type MeterFlags = Pick<MeterView, 'clipping' | 'silent'>;
+
+/** Writes each reading straight to the meter elements; `onFlags` runs only when clipping or silence changes. */
+export function meterSink(meter: MicMeter, elements: () => MeterElements, onFlags: (f: MeterFlags) => void): (r: MeterReading, now: number) => void {
+  let last: MeterFlags = { clipping: false, silent: false };
+  return (r, now) => {
+    const v = meter.push(r, now);
+    const el = elements();
+    if (el.fill) el.fill.style.clipPath = `inset(0 ${(1 - v.level) * 100}% 0 0)`;
+    if (el.hold) el.hold.style.left = `${v.hold * 100}%`;
+    el.bar?.setAttribute('aria-valuenow', String(Math.round(Math.max(-60, v.db))));
+    if (v.clipping !== last.clipping || v.silent !== last.silent) {
+      last = { clipping: v.clipping, silent: v.silent };
+      onFlags(last);
+    }
+  };
 }

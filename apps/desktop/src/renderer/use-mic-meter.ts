@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
-import { measure, MicMeter, type MeterReading } from './mic-meter';
+import { measure, meterSink, MicMeter, windowCovering, type MeterFlags, type MeterReading } from './mic-meter';
 
 export type ReadingSource = (push: (r: MeterReading) => void) => () => void;
+
+const READ_EVERY_MS = 50;
 
 /**
  * Readings from a live microphone stream. A timer rather than animation frames, so silence is
@@ -11,13 +13,13 @@ export function streamReadings(stream: MediaStream): ReadingSource {
   return (push) => {
     const ctx = new AudioContext();
     const an = ctx.createAnalyser();
-    an.fftSize = 2048;
+    an.fftSize = windowCovering(ctx.sampleRate, READ_EVERY_MS);
     ctx.createMediaStreamSource(stream).connect(an);
     const buf = new Float32Array(an.fftSize);
     const timer = window.setInterval(() => {
       an.getFloatTimeDomainData(buf);
       push(measure(buf));
-    }, 50);
+    }, READ_EVERY_MS);
     return () => {
       window.clearInterval(timer);
       void ctx.close();
@@ -25,27 +27,19 @@ export function streamReadings(stream: MediaStream): ReadingSource {
   };
 }
 
-/**
- * Drives a level meter straight through the DOM, so a reading never re-renders the screen;
- * only the clip and silence flags go through React, and only when they change.
- */
 export function useMicMeter(source: ReadingSource | null) {
   const fill = useRef<HTMLSpanElement>(null);
   const hold = useRef<HTMLSpanElement>(null);
-  const [flags, setFlags] = useState({ clipping: false, silent: false });
+  const bar = useRef<HTMLSpanElement>(null);
+  const [flags, setFlags] = useState<MeterFlags>({ clipping: false, silent: false });
   useEffect(() => {
     if (!source) return;
-    const meter = new MicMeter();
-    const off = source((r) => {
-      const v = meter.push(r, performance.now());
-      if (fill.current) fill.current.style.clipPath = `inset(0 ${(1 - v.level) * 100}% 0 0)`;
-      if (hold.current) hold.current.style.left = `${v.hold * 100}%`;
-      setFlags((f) => (f.clipping === v.clipping && f.silent === v.silent ? f : { clipping: v.clipping, silent: v.silent }));
-    });
+    const push = meterSink(new MicMeter(), () => ({ fill: fill.current, hold: hold.current, bar: bar.current }), setFlags);
+    const off = source((r) => push(r, performance.now()));
     return () => {
       off();
       setFlags({ clipping: false, silent: false });
     };
   }, [source]);
-  return { fill, hold, ...flags };
+  return { fill, hold, bar, ...flags };
 }

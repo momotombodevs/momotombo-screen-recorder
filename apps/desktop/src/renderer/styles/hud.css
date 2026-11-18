@@ -12,7 +12,7 @@ body { font: 500 13px/1 var(--font-ui); color: var(--text); -webkit-font-smoothi
 .hud.is-paused .rec-dot { animation: none; background: var(--accent); }
 @keyframes blink { 50% { opacity: 0.35; } }
 .time { font-size: 15px; min-width: 50px; }
-.level-wrap { display: inline-flex; align-items: center; gap: 6px; }
+.level-wrap, .level-status { display: inline-flex; align-items: center; gap: 6px; }
 .level { position: relative; width: 46px; height: 4px; border-radius: 4px; background: rgba(235, 235, 235, 0.12); }
 .level-fill { position: absolute; inset: 0; border-radius: 4px; background: linear-gradient(90deg, var(--success), var(--warning) 80%, var(--record)); clip-path: inset(0 100% 0 0); transition: clip-path 200ms linear; }
 .level-hold { position: absolute; top: -2px; bottom: -2px; left: 0; width: 2px; margin-left: -1px; border-radius: 1px; background: var(--text); }
