@@ -1,7 +1,7 @@
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
-  EXPORT_REQUEST_FLAG, busyReason, exportRequestPathFromArgv, nextStatus, outPathProblem, parseExportRequest, parseExportStatus, requestFileLocation, staleExportFiles, startStatus, statusForRequest,
+  EXPORT_REQUEST_FLAG, busyReason, exportRequestPathFromArgv, nextStatus, outPathProblem, parseExportRequest, parseExportStatus, quitAfterCliJob, requestFileLocation, staleExportFiles, startStatus, statusForRequest,
   type ExportStatus,
 } from './export-request';
 
@@ -156,5 +156,25 @@ describe('staleExportFiles', () => {
     expect(staleExportFiles(entries, 1, `xr_${'4'.repeat(16)}`).sort()).toEqual([
       `export-request-xr_${'1'.repeat(16)}.json`, `export-status-xr_${'1'.repeat(16)}.json`, `export-status-xr_${'2'.repeat(16)}.json`,
     ]);
+  });
+});
+
+describe('quitAfterCliJob', () => {
+  const idle = { launchedForExport: true, interacted: false, jobActive: false, pendingRequests: 0, capturePhase: 'idle', exportsRunning: 0 };
+
+  it('quits an app the CLI started only for its export once nothing is left to do', () => {
+    expect(quitAfterCliJob(idle)).toBe(true);
+    expect(quitAfterCliJob({ ...idle, capturePhase: 'error' })).toBe(true);
+  });
+
+  it.each([
+    ['the app was already running', { launchedForExport: false }],
+    ['the user used the window', { interacted: true }],
+    ['another request is running', { jobActive: true }],
+    ['another request is waiting', { pendingRequests: 1 }],
+    ['a recording is going on', { capturePhase: 'recording' }],
+    ['an export from the dialog is running', { exportsRunning: 1 }],
+  ])('keeps it running when %s', (_label, patch) => {
+    expect(quitAfterCliJob({ ...idle, ...patch })).toBe(false);
   });
 });

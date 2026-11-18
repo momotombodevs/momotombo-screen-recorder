@@ -131,6 +131,7 @@ describe('CliExports', () => {
       cancelExport: async (id) => { calls.push(`cancel ${id}`); },
       abortInRenderer: (id) => calls.push(`abort ${id}`),
       log: () => {},
+      settled: () => calls.push('settled'),
     };
   }
 
@@ -153,6 +154,7 @@ describe('CliExports', () => {
     await cli.accept(await requestFile());
     expect(await statusOf()).toMatchObject({ state: 'queued' });
     expect(host.calls).toEqual(['default Demo 16:9.mp4'.replace(':', 'x'), 'show']);
+    expect(host.calls).not.toContain('settled');
     expect(cli.take(false)).toBeNull();
     const job = cli.take(true);
     expect(job).toMatchObject({ requestId, target: { token: 'exp_1' }, choices: { format: 'mp4' }, opened: { id: projectId, dir: projectDir } });
@@ -167,6 +169,7 @@ describe('CliExports', () => {
     const second = cli.accept(await requestFile({ requestId: otherId }, 'b.json'));
     await second;
     expect(await statusOf(otherId)).toMatchObject({ state: 'refused', reason: 'exporting' });
+    expect(host.calls).not.toContain('settled');
     host.release();
     await first;
     expect(await statusOf()).toMatchObject({ state: 'queued' });
@@ -182,6 +185,7 @@ describe('CliExports', () => {
     await cli.accept(await requestFile({ requestId: otherId, out: join(projectDir, 'media', 'x.mp4') }));
     expect(await statusOf(otherId)).toMatchObject({ state: 'refused', reason: 'invalid-request', error: expect.stringMatching(/exports/) });
     expect(cli.busy).toBe(false);
+    expect(host.calls.filter((c) => c === 'settled')).toHaveLength(2);
   });
 
   it('refuses an unreadable request file found in a project cache folder', async () => {
@@ -209,7 +213,7 @@ describe('CliExports', () => {
     expect(await statusOf()).toMatchObject({ state: 'running', progress: 0.5 });
     await cli.report(report({ state: 'done', outFile: '/etc/passwd', bytes: 5 }), true);
     expect(await statusOf()).toMatchObject({ state: 'done', outFile: out, bytes: 5, progress: 1 });
-    expect(host.calls.at(-1)).toBe('restore');
+    expect(host.calls.slice(-2)).toEqual(['restore', 'settled']);
   });
 
   it('fails a done report when main recorded no finished file', async () => {
@@ -243,7 +247,7 @@ describe('CliExports', () => {
       await cli.accept(await requestFile({ requestId: id }));
       cli.take(true);
       await end(cli, id);
-      expect(host.calls.at(-1), String(i)).toBe('restore');
+      expect(host.calls.slice(-2), String(i)).toEqual(['restore', 'settled']);
       expect(cli.busy).toBe(false);
     }
     expect(await statusOf('xr_0000000000000000')).toMatchObject({ state: 'refused', reason: 'editing-other-project' });
@@ -270,5 +274,19 @@ describe('CliExports', () => {
     expect(left).toHaveLength(6);
     expect(left).toContain(`export-status-${requestId}.json`);
     cli.failNow('stop');
+  });
+});
+
+describe('CliExports with a request it cannot place', () => {
+  it('still says it is idle, so an app started only for it can quit', async () => {
+    const calls: string[] = [];
+    const cli = new CliExports({
+      root, projectDirs: async () => [], readProject: async () => { throw new Error('no'); }, busy: () => ({ capturePhase: 'idle', exportsRunning: 0 }),
+      issueTarget: () => { throw new Error('no'); }, defaultTarget: async () => { throw new Error('no'); }, mediaBase: () => '',
+      showJob: () => {}, restoreThrottling: () => {}, cancelExport: async () => {}, abortInRenderer: () => {}, log: () => {},
+      settled: () => calls.push('settled'),
+    });
+    await cli.accept(join(base, 'missing.json'));
+    expect(calls).toEqual(['settled']);
   });
 });

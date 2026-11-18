@@ -12,7 +12,7 @@ import { CaptureWorker, IMPORT_VIDEO_TYPES, Schemas, type AppInfo, type Channel,
 import { newId, type Recording } from '@momotombo/project-model';
 import { APP_NAME, PROJECTS_FOLDER } from '../shared/brand';
 import { projectIdFromArgv } from '../shared/open-project';
-import { exportRequestPathFromArgv } from '../shared/export-request';
+import { exportRequestPathFromArgv, quitAfterCliJob } from '../shared/export-request';
 import { CliExports } from './cli-export';
 import { migrateLegacyData } from './legacy-name';
 import { CaptureManager } from './capture/manager';
@@ -81,6 +81,9 @@ const exportRequests: string[] = [];
 const startupExportRequest = exportRequestPathFromArgv(process.argv);
 if (startupExportRequest) exportRequests.push(startupExportRequest);
 let drainExportRequests: (() => void) | null = null;
+let exportAcceptsInFlight = 0;
+let userInteracted = false;
+const markInteracted = () => { userInteracted = true; };
 let failCliJobNow: ((error: string) => void) | null = null;
 let watchCliWindow: ((wc: Electron.WebContents) => void) | null = null;
 
@@ -96,6 +99,8 @@ function openMainWindow(inactive = false): BrowserWindow {
     }
   });
   watchCliWindow?.(win.webContents);
+  win.on('focus', markInteracted);
+  win.webContents.on('before-input-event', markInteracted);
   mainWindow = win;
   return win;
 }
@@ -407,10 +412,27 @@ function registerIpc(): void {
     },
     abortInRenderer: (requestId) => broadcast('export:cliCancel', requestId),
     log: (line) => process.stderr.write(`${line}\n`),
+    settled: () => quitIfOnlyForCli(),
   });
+  const quitIfOnlyForCli = () => {
+    const quit = quitAfterCliJob({
+      launchedForExport: startupExportRequest !== null, interacted: userInteracted, jobActive: cli.busy,
+      pendingRequests: exportRequests.length + exportAcceptsInFlight, capturePhase: capture.state.phase,
+      exportsRunning: exportsWriter.pending + mfExports.pending,
+    });
+    if (quit && !SMOKE) app.quit();
+  };
   failCliJobNow = (error) => cli.failNow(error);
   drainExportRequests = () => {
-    for (const path of exportRequests.splice(0)) void cli.accept(path).catch((e: unknown) => process.stderr.write(`Export request failed: ${String(e)}\n`));
+    for (const path of exportRequests.splice(0)) {
+      exportAcceptsInFlight++;
+      void cli.accept(path)
+        .catch((e: unknown) => process.stderr.write(`Export request failed: ${String(e)}\n`))
+        .finally(() => {
+          exportAcceptsInFlight--;
+          quitIfOnlyForCli();
+        });
+    }
   };
   handleNoArgs('export:takeCliJob', (e): CliExportJob | null => cli.take(isMainWindow(e)));
   handle('export:cliReport', (report, e) => cli.report(report, isMainWindow(e)));
@@ -744,6 +766,7 @@ app.on('second-instance', (_event, argv) => {
     drainExportRequests?.();
     return;
   }
+  markInteracted();
   const id = projectIdFromArgv(argv);
   if (id) requestOpenProject(id);
   restoreMain();
@@ -766,6 +789,7 @@ app.on('window-all-closed', () => {
 // Dock click (macOS): bring back a minimized or hidden window, or open a new one.
 app.on('activate', () => {
   if (!app.isReady()) return;
+  markInteracted();
   restoreMain();
 });
 

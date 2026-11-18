@@ -114,6 +114,7 @@ export interface CliExportHost {
   cancelExport(exportId: string): Promise<void>;
   abortInRenderer(requestId: string): void;
   log(line: string): void;
+  settled(): void;
   now?: () => Date;
 }
 
@@ -150,8 +151,9 @@ export class CliExports {
     return this.writes;
   }
 
-  private refuse(dir: string, requestId: string, reason: RefusalReason, error: string): Promise<void> {
-    return this.save(dir, startStatus(requestId, this.now(), { state: 'refused', reason, error }));
+  private async refuse(dir: string, requestId: string, reason: RefusalReason, error: string): Promise<void> {
+    await this.save(dir, startStatus(requestId, this.now(), { state: 'refused', reason, error }));
+    if (!this.active) this.host.settled();
   }
 
   private finish(active: ActiveJob, patch: Partial<ExportStatus> & { state: 'done' | 'failed' | 'refused' }): Promise<void> {
@@ -161,7 +163,7 @@ export class CliExports {
     this.cancelTimer = null;
     this.host.restoreThrottling();
     const next = nextStatus(active.status, { ...active.status, ...patch }, this.now());
-    return next ? this.save(active.dir, next) : this.writes;
+    return (next ? this.save(active.dir, next) : this.writes).then(() => { if (!this.active) this.host.settled(); });
   }
 
   private async dirOf(id: string): Promise<string | null> {
@@ -181,6 +183,7 @@ export class CliExports {
       this.host.log(`Export request refused: ${loaded.error}`);
       const where = loaded.dir && loaded.requestId ? { dir: loaded.dir, requestId: loaded.requestId } : await this.locate(path);
       if (where) await this.refuse(where.dir, where.requestId, 'invalid-request', loaded.error);
+      else if (!this.active) this.host.settled();
       return;
     }
     const { request, dir, out } = loaded;

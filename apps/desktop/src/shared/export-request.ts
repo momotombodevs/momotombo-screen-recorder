@@ -133,3 +133,10 @@ export function staleExportFiles(entries: readonly { name: string; mtimeMs: numb
   const kept = new Set([current, ...[...newest].filter(([id]) => id !== current).sort((a, b) => b[1] - a[1]).slice(0, keep).map(([id]) => id)]);
   return entries.filter((e) => { const id = EXPORT_FILE.exec(e.name)?.[1]; return id !== undefined && !kept.has(id); }).map((e) => e.name);
 }
+
+export function quitAfterCliJob(s: {
+  launchedForExport: boolean; interacted: boolean; jobActive: boolean; pendingRequests: number; capturePhase: string; exportsRunning: number;
+}): boolean {
+  return s.launchedForExport && !s.interacted && !s.jobActive && s.pendingRequests === 0
+    && (s.capturePhase === 'idle' || s.capturePhase === 'error') && s.exportsRunning === 0;
+}
