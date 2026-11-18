@@ -1,5 +1,5 @@
 import type { Transition } from "./easing";
-import { AUDIO_LIMITS, TEXT_LIMITS } from "./factory";
+import { AUDIO_LIMITS, MAGNIFIER_LIMITS, TEXT_LIMITS } from "./factory";
 import { sortedByStart, sortedByTime } from "./sorting";
 import type {
   Background,
@@ -246,10 +246,10 @@ const CURSOR_FIELDS: Record<keyof CursorStyle, Check> = {
 };
 
 const MAGNIFIER_FIELDS: Record<keyof MagnifierStyle, Check> = {
-  size: num,
-  zoom: num,
+  size: (v, p) => num(v, p, MAGNIFIER_LIMITS.size),
+  zoom: (v, p) => num(v, p, MAGNIFIER_LIMITS.zoom),
   shape: (v, p) => oneOf(v, p, ["circle", "rounded"] as const),
-  border,
+  border: (v, p) => fields({ width: (x, q) => num(x, q, MAGNIFIER_LIMITS.border), color: str }, v, p),
   hideWhenIdle: bool,
 };
 
@@ -468,8 +468,8 @@ function privacyItem(v: unknown, path: string): PrivacyItem {
 
 function magnifierItem(v: unknown, path: string): MagnifierItem {
   const o = itemBase(v, path, "magnifier");
-  num(o.size, `${path}.size`);
-  num(o.zoom, `${path}.zoom`);
+  num(o.size, `${path}.size`, MAGNIFIER_LIMITS.size);
+  num(o.zoom, `${path}.zoom`, MAGNIFIER_LIMITS.zoom);
   return o as unknown as MagnifierItem;
 }
 

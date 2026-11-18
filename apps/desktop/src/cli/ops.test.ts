@@ -286,6 +286,13 @@ describe('out-of-range values in an op', () => {
     else expect(got).toMatch(message);
   });
 
+  it('refuses magnifier settings outside the limits', () => {
+    expect(failure([{ op: 'addMagnifier', start: 2, end: 4, size: 1000 }])).toBe('op 0 (addMagnifier): magnifiers[0].size must be ≤ 560');
+    expect(failure([{ op: 'setStyle', patch: { magnifier: { border: { width: 20 } } } }])).toBe('op 0 (setStyle): style.magnifier.border.width must be ≤ 8');
+    const p = apply([{ op: 'addMagnifier', start: 2, end: 4 }]);
+    expect(failure([{ op: 'updateItem', track: 'magnifiers', id: p.magnifiers[0]!.id, patch: { zoom: -1 } }], p)).toBe('op 0 (updateItem): magnifiers[0].zoom must be ≥ 1.25');
+  });
+
   it('names the op for an out-of-range updateItem patch', () => {
     const p = apply([{ op: 'addZoom', start: 2, end: 4 }]);
     expect(failure([{ op: 'updateItem', track: 'zooms', id: p.zooms[0]!.id, patch: { scale: 0 } }], p)).toBe('op 0 (updateItem): zooms[0].scale must be > 0');
