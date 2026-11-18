@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { readFile, stat } from 'node:fs/promises';
-import { layoutSegments, parseCursorLog, sequenceDuration, type Project, type Recording, type SourceKind } from '@momotombo/project-model';
+import { MAX_AUDIO_GAIN, layoutSegments, parseCursorLog, sequenceDuration, type Project, type Recording, type SourceKind } from '@momotombo/project-model';
 import { secondsToTicks, ticksToSeconds } from '@momotombo/timing';
 import { safeJoin } from '../main/fsutil';
 import type { Op } from './ops';
@@ -23,13 +23,13 @@ export const DEAD_TIME_WARNING_SECONDS = 8;
 export const DEAD_TIME_WARNING_SHARE = 0.15;
 export const TARGET_LUFS = -16;
 export const MAX_TRUE_PEAK_DBTP = -1;
-export const MIC_GAIN_MAX = 1;
 export const NORMALIZE_MAX_BOOST_DB = 30;
 export const VOICE_HIGHPASS_HZ = 80;
 export const LEVEL_CHANGE_MIN_DB = 1;
 export const EBUR128_SILENT_LUFS = -70;
 export const MIC_SILENT_SHARE = 0.95;
 export const MIC_QUIET_LUFS = -30;
+export const MIC_NO_VOICE_MARGIN_DB = 6;
 export const MIC_MIN_SNR_DB = 20;
 export const MIC_NOISY_SNR_DB = 30;
 export const CLIP_SAMPLE_PEAK_DBFS = -0.1;
@@ -49,7 +49,7 @@ const THRESHOLDS = {
   silenceBelowLoudnessDb: SILENCE_BELOW_LOUDNESS_DB, silenceAboveNoiseDb: SILENCE_ABOVE_NOISE_DB, silenceThresholdMaxDb: SILENCE_THRESHOLD_MAX_DB,
   silenceMinSeconds: SILENCE_MIN_SECONDS, blackMinSeconds: BLACK_MIN_SECONDS, blackPixelThreshold: BLACK_PIXEL_THRESHOLD, freezeNoiseDb: FREEZE_NOISE_DB,
   freezeMinSeconds: FREEZE_MIN_SECONDS, cursorIdleSeconds: CURSOR_IDLE_SECONDS, deadTimeCutSeconds: DEAD_TIME_CUT_SECONDS, cutPaddingSeconds: CUT_PADDING_SECONDS,
-  targetLufs: TARGET_LUFS, maxTruePeakDbtp: MAX_TRUE_PEAK_DBTP, micGainMax: MIC_GAIN_MAX, normalizeMaxBoostDb: NORMALIZE_MAX_BOOST_DB,
+  targetLufs: TARGET_LUFS, maxTruePeakDbtp: MAX_TRUE_PEAK_DBTP, micGainMax: MAX_AUDIO_GAIN, micNoVoiceMarginDb: MIC_NO_VOICE_MARGIN_DB, normalizeMaxBoostDb: NORMALIZE_MAX_BOOST_DB,
   micQuietLufs: MIC_QUIET_LUFS, micMinSnrDb: MIC_MIN_SNR_DB, micNoisySnrDb: MIC_NOISY_SNR_DB, cameraDarkYavg: CAMERA_DARK_YAVG,
   minScreenHeight: MIN_SCREEN_HEIGHT, minFps: MIN_FPS,
 };
@@ -178,6 +178,7 @@ export interface LevelSuggestion {
   suggestedGain: number | null;
   expectedLufs: number;
   limitedBy: 'max-gain' | 'true-peak' | 'max-normalize' | null;
+  withheldBy: string[];
   op: Op | null;
 }
 
@@ -339,7 +340,7 @@ export function suggestCuts(project: Project, dead: (Range & { recordingId: stri
 
 interface MicChannel { gain: number; highpassHz?: number; normalize?: { enabled: boolean; targetLufs: number } }
 
-export function micLevelSuggestion(project: Project, recordings: RecordingAnalysis[]): LevelSuggestion | null {
+export function micLevelSuggestion(project: Project, recordings: RecordingAnalysis[], findings: Finding[]): LevelSuggestion | null {
   const measured = recordings.flatMap((r) => {
     const mic = r.audio.mic;
     return mic?.integratedLufs != null && mic.integratedLufs > EBUR128_SILENT_LUFS ? [{ lufs: mic.integratedLufs, peak: mic.truePeakDbtp, weight: r.durationSeconds }] : [];
@@ -349,6 +350,8 @@ export function micLevelSuggestion(project: Project, recordings: RecordingAnalys
   const measuredLufs = round(10 * Math.log10(measured.reduce((s, m) => s + m.weight * 10 ** (m.lufs / 10), 0) / weight), 1);
   const channel = project.audio.mic as MicChannel;
   const currentGain = channel.gain;
+  const withheldBy = findings.filter((f) => f.severity === 'blocker' && f.code.startsWith('MIC_')).map((f) => f.code);
+  const unless = (op: Op | null) => (withheldBy.length ? null : op);
 
   if (channel.normalize && typeof channel.highpassHz === 'number') {
     const targetLufs = channel.normalize.targetLufs;
@@ -361,7 +364,8 @@ export function micLevelSuggestion(project: Project, recordings: RecordingAnalys
       suggestedGain: null,
       expectedLufs: round(capped ? measuredLufs + NORMALIZE_MAX_BOOST_DB : targetLufs, 1),
       limitedBy: capped ? 'max-normalize' : null,
-      op: done || Math.abs(neededDb) < LEVEL_CHANGE_MIN_DB ? null : { op: 'setAudio', patch: { mic: { highpassHz: VOICE_HIGHPASS_HZ, normalize: { enabled: true } } } },
+      withheldBy,
+      op: unless(done || Math.abs(neededDb) < LEVEL_CHANGE_MIN_DB ? null : { op: 'setAudio', patch: { mic: { highpassHz: VOICE_HIGHPASS_HZ, normalize: { enabled: true } } } }),
     };
   }
 
@@ -369,15 +373,16 @@ export function micLevelSuggestion(project: Project, recordings: RecordingAnalys
   const neededDb = TARGET_LUFS - measuredLufs;
   const headroomDb = peaks.length ? MAX_TRUE_PEAK_DBTP - Math.max(...peaks) : Infinity;
   const allowed = 10 ** (Math.min(neededDb, headroomDb) / 20);
-  const suggestedGain = round(Math.min(MIC_GAIN_MAX, allowed), 2);
+  const suggestedGain = round(Math.min(MAX_AUDIO_GAIN, allowed), 2);
   const changeDb = Math.abs(20 * Math.log10(suggestedGain / currentGain));
   return {
     method: 'gain', currentGain, measuredLufs, targetLufs: TARGET_LUFS,
     neededGain: round(10 ** (neededDb / 20), 2),
     suggestedGain,
     expectedLufs: round(measuredLufs + 20 * Math.log10(suggestedGain), 1),
-    limitedBy: allowed > MIC_GAIN_MAX ? 'max-gain' : headroomDb < neededDb ? 'true-peak' : null,
-    op: suggestedGain > 0 && changeDb >= LEVEL_CHANGE_MIN_DB ? { op: 'setAudio', patch: { mic: { gain: suggestedGain } } } : null,
+    limitedBy: allowed > MAX_AUDIO_GAIN ? 'max-gain' : headroomDb < neededDb ? 'true-peak' : null,
+    withheldBy,
+    op: unless(suggestedGain > 0 && changeDb >= LEVEL_CHANGE_MIN_DB ? { op: 'setAudio', patch: { mic: { gain: suggestedGain } } } : null),
   };
 }
 
@@ -420,14 +425,20 @@ export function findingsFor(rec: RecordingAnalysis): Finding[] {
     const lufs = mic.integratedLufs;
     const snrDb = lufs !== null && mic.noiseFloorDb !== null ? round(lufs - mic.noiseFloorDb, 1) : null;
     const boostDb = lufs === null ? 0 : TARGET_LUFS - lufs;
-    const level = { integratedLufs: lufs, truePeakDbtp: mic.truePeakDbtp, noiseFloorDb: mic.noiseFloorDb, snrDb, silenceShare: mic.silenceShare, silenceThresholdDb: mic.silenceThresholdDb };
+    const level = { integratedLufs: lufs, truePeakDbtp: mic.truePeakDbtp, noiseFloorDb: mic.noiseFloorDb, loudnessOverNoiseDb: snrDb, silenceShare: mic.silenceShare, silenceThresholdDb: mic.silenceThresholdDb };
     const quiet = lufs !== null && lufs < MIC_QUIET_LUFS;
     if (lufs === null || lufs <= EBUR128_SILENT_LUFS || mic.silenceShare >= MIC_SILENT_SHARE)
       add('blocker', 'MIC_SILENT', `The microphone picked up no voice: ${Math.round(mic.silenceShare * 100)}% of the take is at the room-noise level.`, level,
         'Check that the right microphone is selected and not muted, speak within a hand span of it, and raise its input level in System Settings > Sound.');
+    else if (snrDb !== null && snrDb < MIC_NO_VOICE_MARGIN_DB)
+      add('blocker', 'MIC_NO_VOICE',
+        `The microphone track ${snrDb > -MIC_NO_VOICE_MARGIN_DB ? `stays within ${Math.abs(snrDb)} dB of` : 'never rises above'} its own noise floor (loudness ${lufs} LUFS, noise floor ${round(mic.noiseFloorDb!, 1)} dBFS): no usable voice was recorded.`,
+        { ...level, marginDb: snrDb > -MIC_NO_VOICE_MARGIN_DB ? Math.abs(snrDb) : 0 },
+        'Check that the right microphone is selected and not muted, speak within a hand span of it, and raise its input level in System Settings > Sound.');
     else if (snrDb !== null && snrDb < MIC_MIN_SNR_DB)
       add('blocker', quiet ? 'MIC_TOO_QUIET' : 'MIC_NOISY',
-        `The voice is only ${snrDb} dB above the room noise${quiet ? ` (${lufs} LUFS)` : ''}; bringing it to ${TARGET_LUFS} LUFS would make the noise about ${round((mic.noiseFloorDb ?? 0) + boostDb, 1)} dB.`, level,
+        `The voice is only ${snrDb} dB above the room noise (loudness ${lufs} LUFS); bringing it to ${TARGET_LUFS} LUFS would raise the noise floor to about ${round(mic.noiseFloorDb! + boostDb, 1)} dBFS.`,
+        { ...level, marginDb: snrDb },
         quiet ? 'Move much closer to the microphone and raise its input level; a boost this large in the edit makes the noise as loud as the voice.' : 'Record in a quieter room: close windows, turn off fans or AC, and close noisy apps.');
     else {
       if (quiet)
@@ -647,7 +658,7 @@ export async function analyzeProject(dir: string, project: Project, run: Run = t
   const findings = recordings.flatMap(findingsFor);
   const order = { blocker: 0, warning: 1, info: 2 };
   findings.sort((a, b) => order[a.severity] - order[b.severity]);
-  const micLevel = micLevelSuggestion(project, recordings);
+  const micLevel = micLevelSuggestion(project, recordings, findings);
   const cuts = suggestCuts(project, recordings.flatMap((r) => (r.deadTime?.ranges ?? []).map((d) => ({ ...d, recordingId: r.id }))));
   const count = (severity: Finding['severity']) => findings.filter((f) => f.severity === severity).length;
   return {

@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { mkdtemp, mkdir, readdir, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
-import { addRecording, createProject, removeTimelineRange, serializeProject, type Project, type Recording } from '@momotombo/project-model';
+import { MAX_AUDIO_GAIN, addRecording, createProject, removeTimelineRange, serializeProject, type AudioChannel, type Project, type Recording } from '@momotombo/project-model';
 import { secondsToTicks } from '@momotombo/timing';
 import { describe, expect, it } from 'vitest';
 import {
@@ -171,8 +171,24 @@ describe('findingsFor', () => {
     expect(verdictFor(found).verdict).toBe('edit-with-fixes');
   });
 
-  it('blocks a quiet mic whose boost would make the noise as loud as the voice', () => {
-    expect(codes(findingsFor(withMic({ integratedLufs: -53.9, noiseFloorDb: -50.8, silenceShare: 0.8 })))).toEqual(['blocker:MIC_TOO_QUIET']);
+  it('says no usable voice was recorded when the mic stays near its own noise floor', () => {
+    const [finding, ...rest] = findingsFor(withMic({ integratedLufs: -53.9, noiseFloorDb: -50.798, silenceShare: 0.808 }));
+    expect(rest).toEqual([]);
+    expect(finding).toMatchObject({ severity: 'blocker', code: 'MIC_NO_VOICE', evidence: { marginDb: 3.1 } });
+    expect(finding!.message).toBe('The microphone track stays within 3.1 dB of its own noise floor (loudness -53.9 LUFS, noise floor -50.8 dBFS): no usable voice was recorded.');
+    expect(finding!.advice).toMatch(/right microphone/);
+  });
+
+  it('never reports a negative margin when the noise floor is above the loudness', () => {
+    const [finding] = findingsFor(withMic({ integratedLufs: -60, noiseFloorDb: -48, silenceShare: 0.5 }));
+    expect(finding).toMatchObject({ code: 'MIC_NO_VOICE', evidence: { marginDb: 0 } });
+    expect(finding!.message).toBe('The microphone track never rises above its own noise floor (loudness -60 LUFS, noise floor -48 dBFS): no usable voice was recorded.');
+  });
+
+  it('blocks a quiet mic whose boost would make the noise too loud, with a positive margin', () => {
+    const [finding] = findingsFor(withMic({ integratedLufs: -40, noiseFloorDb: -52, silenceShare: 0.5 }));
+    expect(finding).toMatchObject({ severity: 'blocker', code: 'MIC_TOO_QUIET', evidence: { marginDb: 12 } });
+    expect(finding!.message).toBe('The voice is only 12 dB above the room noise (loudness -40 LUFS); bringing it to -16 LUFS would raise the noise floor to about -28 dBFS.');
   });
 
   it('blocks a quiet mic that needs more boost than normalization gives', () => {
@@ -295,37 +311,50 @@ describe('suggestCuts', () => {
 });
 
 describe('micLevelSuggestion', () => {
-  const project = (mic: Record<string, unknown> = {}): Project => {
+  const voiceProject = (mic: Partial<AudioChannel> = {}): Project => {
     const p = addRecording(createProject('Demo'), recording(60, { mic: source('mic', 60) }));
     return { ...p, audio: { ...p.audio, mic: { ...p.audio.mic, ...mic } } };
   };
-  const voice = { highpassHz: 0, normalize: { enabled: false, targetLufs: -16, measuredLufs: null } };
+  const plainProject = (gain = 1): Project => {
+    const p = voiceProject();
+    return { ...p, audio: { ...p.audio, mic: { gain, muted: false } as AudioChannel } };
+  };
   const mic = (integratedLufs: number, truePeakDbtp: number) => withMic({ integratedLufs, truePeakDbtp });
+  const blocker = (code: string): Finding => ({ severity: 'blocker', code, message: 'm', evidence: {}, advice: 'a', recordingId: 'r1' });
 
-  it('lowers a loud mic toward -16 LUFS with the gain', () => {
-    const s = micLevelSuggestion(project(), [mic(-10, -0.5)]);
+  it('lowers a loud mic toward -16 LUFS with the gain when the project has no voice enhancement', () => {
+    const s = micLevelSuggestion(plainProject(), [mic(-10, -0.5)], []);
     expect(s).toMatchObject({ method: 'gain', suggestedGain: 0.5, limitedBy: null, op: { op: 'setAudio', patch: { mic: { gain: 0.5 } } } });
     expect(s!.expectedLufs).toBeCloseTo(-16, 0);
   });
 
-  it('cannot raise the gain past the editor maximum and says so', () => {
-    expect(micLevelSuggestion(project(), [mic(-26, -12)])).toMatchObject({ suggestedGain: 1, limitedBy: 'max-gain', op: null });
-    expect(micLevelSuggestion(project({ gain: 0.5 }), [mic(-26, -12)])).toMatchObject({ suggestedGain: 1, limitedBy: 'max-gain', op: { op: 'setAudio', patch: { mic: { gain: 1 } } } });
-    expect(micLevelSuggestion(project(), [mic(-53.9, -33.3)])).toMatchObject({ neededGain: 78.52, suggestedGain: 1, limitedBy: 'max-gain', op: null });
+  it('raises the gain up to the model maximum and says when that is not enough', () => {
+    expect(micLevelSuggestion(plainProject(), [mic(-24, -12)], [])).toMatchObject({ suggestedGain: 2.51, limitedBy: null, op: { patch: { mic: { gain: 2.51 } } } });
+    expect(micLevelSuggestion(plainProject(), [mic(-30, -20)], [])).toMatchObject({ suggestedGain: MAX_AUDIO_GAIN, limitedBy: 'max-gain', op: { patch: { mic: { gain: MAX_AUDIO_GAIN } } } });
+    expect(micLevelSuggestion(plainProject(MAX_AUDIO_GAIN), [mic(-30, -20)], [])).toMatchObject({ limitedBy: 'max-gain', op: null });
+  });
+
+  it('stops the gain where the peaks would pass -1 dBTP', () => {
+    expect(micLevelSuggestion(plainProject(), [mic(-24, -4)], [])).toMatchObject({ suggestedGain: 1.41, limitedBy: 'true-peak' });
   });
 
   it('turns on voice normalization when the project supports it', () => {
-    expect(micLevelSuggestion(project(voice), [mic(-38, -20)])).toEqual({
-      method: 'normalize', currentGain: 1, measuredLufs: -38, targetLufs: -16, neededGain: 12.59, suggestedGain: null, expectedLufs: -16, limitedBy: null,
+    expect(micLevelSuggestion(voiceProject(), [mic(-38, -20)], [])).toEqual({
+      method: 'normalize', currentGain: 1, measuredLufs: -38, targetLufs: -16, neededGain: 12.59, suggestedGain: null, expectedLufs: -16, limitedBy: null, withheldBy: [],
       op: { op: 'setAudio', patch: { mic: { highpassHz: 80, normalize: { enabled: true } } } },
     });
-    expect(micLevelSuggestion(project(voice), [mic(-50, -30)])).toMatchObject({ limitedBy: 'max-normalize', expectedLufs: -20 });
-    expect(micLevelSuggestion(project({ highpassHz: 80, normalize: { ...voice.normalize, enabled: true } }), [mic(-38, -20)])!.op).toBeNull();
+    expect(micLevelSuggestion(voiceProject(), [mic(-50, -30)], [])).toMatchObject({ limitedBy: 'max-normalize', expectedLufs: -20 });
+    expect(micLevelSuggestion(voiceProject({ highpassHz: 80, normalize: { enabled: true, targetLufs: -16 } }), [mic(-38, -20)], [])!.op).toBeNull();
+  });
+
+  it('withholds the audio op when a mic finding rules it out', () => {
+    expect(micLevelSuggestion(voiceProject(), [mic(-53.9, -33.3)], [blocker('MIC_NO_VOICE')])).toMatchObject({ op: null, withheldBy: ['MIC_NO_VOICE'] });
+    expect(micLevelSuggestion(plainProject(), [mic(-30, -20)], [blocker('SCREEN_FILE_MISSING')])!.op).not.toBeNull();
   });
 
   it('suggests nothing without measured mic audio', () => {
-    expect(micLevelSuggestion(project(), [{ ...healthy(), audio: { mic: null, system: null } }])).toBeNull();
-    expect(micLevelSuggestion(project(), [mic(-70, -60)])).toBeNull();
+    expect(micLevelSuggestion(voiceProject(), [{ ...healthy(), audio: { mic: null, system: null } }], [])).toBeNull();
+    expect(micLevelSuggestion(voiceProject(), [mic(-70, -60)], [])).toBeNull();
   });
 });
 
@@ -367,6 +396,7 @@ describe('analyzeProject with a fake ffmpeg', () => {
     const report = await analyzeProject(await folder(), take(), fakeRun(calls));
     expect(calls.flat().find((a) => a.startsWith('silencedetect'))).toBe('silencedetect=noise=-40.8dB:d=0.6');
     expect(report.recordings[0]!.audio.mic!.silenceThresholdDb).toBe(-40.8);
+    expect(report.suggestedOps.filter((op) => op.op === 'setAudio')).toEqual([]);
   });
 
   it('places silences in recording time using the start offset and sync offset', async () => {
