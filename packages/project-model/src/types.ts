@@ -244,12 +244,8 @@ export interface AudioChannel {
   highpassHz: number;
   compressor: { enabled: boolean; thresholdDb: number; ratio: number };
   gate: { enabled: boolean; thresholdDb: number };
-  /**
-   * Brings the channel's integrated loudness (ITU-R BS.1770, after filter, gate and
-   * compressor, before gain) to targetLufs. measuredLufs caches that loudness for the
-   * preview; null means not measured yet or nothing measurable.
-   */
-  normalize: { enabled: boolean; targetLufs: number; measuredLufs: number | null };
+  /** Brings the channel's integrated loudness (ITU-R BS.1770, after filter, gate and compressor, before gain) to targetLufs. */
+  normalize: { enabled: boolean; targetLufs: number };
 }
 
 export const MAX_AUDIO_GAIN = 3;

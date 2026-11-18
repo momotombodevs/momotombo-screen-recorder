@@ -23,49 +23,73 @@ function kWeightingShelfThenHighpass(rate: number): [Coefs, Coefs] {
   return [shelf, highpass];
 }
 
-function filtered(x: Float32Array, stages: Coefs[]): Float64Array {
-  const y = Float64Array.from(x);
-  for (const [b0, b1, b2, a1, a2] of stages) {
-    let x1 = 0, x2 = 0, y1 = 0, y2 = 0;
-    for (let i = 0; i < y.length; i++) {
-      const v = y[i]!;
-      const out = b0 * v + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
-      x2 = x1; x1 = v; y2 = y1; y1 = out;
-      y[i] = out;
-    }
-  }
-  return y;
-}
-
 const ABSOLUTE_GATE = -70;
 const RELATIVE_GATE = -10;
 const lufs = (power: number) => -0.691 + 10 * Math.log10(power);
 
+class Biquad {
+  private x1 = 0; private x2 = 0; private y1 = 0; private y2 = 0;
+  constructor(private readonly c: Coefs) {}
+  step(x: number): number {
+    const [b0, b1, b2, a1, a2] = this.c;
+    const y = b0 * x + b1 * this.x1 + b2 * this.x2 - a1 * this.y1 - a2 * this.y2;
+    this.x2 = this.x1; this.x1 = x; this.y2 = this.y1; this.y1 = y;
+    return y;
+  }
+}
+
 /**
- * Integrated loudness (ITU-R BS.1770-4) of channels that each carry weight 1 (mono, or left and
- * right): K-weighting, 400 ms blocks every 100 ms, absolute gate at -70 LUFS, relative gate 10 LU
- * below. Null when no block passes the gates (silence, or shorter than one block).
+ * Integrated loudness (ITU-R BS.1770-4) fed block by block, so a long track never needs to be
+ * held or copied. Every channel carries weight 1 (mono, or left and right); the same array passed
+ * twice (a mono source on both sides) is filtered once and counted twice. K-weighting, 400 ms
+ * blocks every 100 ms, absolute gate at -70 LUFS, relative gate 10 LU below. result() is null
+ * when no block passes the gates (silence, or shorter than one block).
  */
+export class LoudnessMeter {
+  private readonly step: number;
+  private readonly filters: [Biquad, Biquad][] = [];
+  private readonly stepPower: number[] = [];
+  private pos = 0;
+
+  constructor(private readonly rate: number) {
+    this.step = Math.round(rate * 0.1);
+  }
+
+  push(channels: readonly Float32Array[]): void {
+    const weights = new Map<Float32Array, number>();
+    for (const c of channels) weights.set(c, (weights.get(c) ?? 0) + 1);
+    let k = 0;
+    let n = 0;
+    for (const [c, w] of weights) {
+      const [shelf, highpass] = (this.filters[k++] ??= kWeightingShelfThenHighpass(this.rate).map((c) => new Biquad(c)) as [Biquad, Biquad]);
+      n = c.length;
+      for (let i = 0; i < n; i++) {
+        const y = highpass.step(shelf.step(c[i]!));
+        const s = Math.floor((this.pos + i) / this.step);
+        this.stepPower[s] = (this.stepPower[s] ?? 0) + w * y * y;
+      }
+    }
+    this.pos += n;
+  }
+
+  result(): number | null {
+    const steps = Math.floor(this.pos / this.step);
+    const blocks: number[] = [];
+    for (let b = 0; b + 4 <= steps; b++) {
+      let sum = 0;
+      for (let j = b; j < b + 4; j++) sum += this.stepPower[j] ?? 0;
+      blocks.push(sum / (this.step * 4));
+    }
+    const mean = (xs: number[]) => xs.reduce((a, v) => a + v, 0) / xs.length;
+    const loud = blocks.filter((p) => p > 0 && lufs(p) > ABSOLUTE_GATE);
+    if (loud.length === 0) return null;
+    const relative = lufs(mean(loud)) + RELATIVE_GATE;
+    return lufs(mean(loud.filter((p) => lufs(p) > relative)));
+  }
+}
+
 export function integratedLoudness(channels: readonly Float32Array[], rate: number): number | null {
-  const stages = kWeightingShelfThenHighpass(rate);
-  const weighted = channels.map((c) => filtered(c, stages));
-  const step = Math.round(rate * 0.1);
-  const size = step * 4;
-  const length = weighted[0]?.length ?? 0;
-  const stepPower: number[] = [];
-  for (let s = 0; s + step <= length; s += step) {
-    let sum = 0;
-    for (const c of weighted) for (let i = s; i < s + step; i++) sum += c[i]! * c[i]!;
-    stepPower.push(sum);
-  }
-  const blocks: number[] = [];
-  for (let b = 0; b + 4 <= stepPower.length; b++) {
-    blocks.push((stepPower[b]! + stepPower[b + 1]! + stepPower[b + 2]! + stepPower[b + 3]!) / size);
-  }
-  const mean = (xs: number[]) => xs.reduce((a, v) => a + v, 0) / xs.length;
-  const loud = blocks.filter((p) => p > 0 && lufs(p) > ABSOLUTE_GATE);
-  if (loud.length === 0) return null;
-  const relative = lufs(mean(loud)) + RELATIVE_GATE;
-  const gated = loud.filter((p) => lufs(p) > relative);
-  return lufs(mean(gated));
+  const meter = new LoudnessMeter(rate);
+  meter.push(channels);
+  return meter.result();
 }

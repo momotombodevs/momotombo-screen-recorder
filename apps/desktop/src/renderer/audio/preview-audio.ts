@@ -11,6 +11,7 @@ interface Route {
 }
 
 const LIMIT_RANGE = 4;
+const GAIN_SMOOTHING_S = 0.015;
 const CURVE_POINTS = 8193;
 const RATE = 48_000;
 
@@ -33,8 +34,16 @@ export class PreviewAudio {
   private routes = new Map<HTMLMediaElement, Route>();
   private worklet: 'loading' | 'ready' | 'failed' | null = null;
   private mix: AudioMix | null = null;
+  private loudness: (kind: Kind) => number | null = () => null;
 
-  constructor(private readonly loadWorklet: (ctx: AudioContext) => Promise<void> = defaultWorklet) {}
+  constructor(
+    private readonly onStatus: () => void = () => undefined,
+    private readonly loadWorklet: (ctx: AudioContext) => Promise<void> = defaultWorklet,
+  ) {}
+
+  get enhancementUnavailable(): boolean {
+    return this.worklet === 'failed';
+  }
 
   private context(): AudioContext | null {
     if (this.ctx || typeof AudioContext === 'undefined') return this.ctx;
@@ -69,8 +78,9 @@ export class PreviewAudio {
     this.routes.delete(el);
   }
 
-  update(mix: AudioMix, elements: Iterable<[HTMLMediaElement, Kind]>): void {
+  update(mix: AudioMix, elements: Iterable<[HTMLMediaElement, Kind]>, loudness: (kind: Kind) => number | null): void {
     this.mix = mix;
+    this.loudness = loudness;
     for (const [el, kind] of elements) {
       const r = this.routes.get(el);
       if (r) this.apply(el, r, mix);
@@ -79,8 +89,20 @@ export class PreviewAudio {
     }
   }
 
-  resume(): void {
-    if (this.ctx?.state === 'suspended') void this.ctx.resume().catch(() => undefined);
+  /** Resolves once sound can come out; null when nothing needs to start. */
+  resume(): Promise<void> | null {
+    if (this.ctx?.state !== 'suspended') return null;
+    return this.ctx.resume().catch(() => undefined);
+  }
+
+  routed(el: HTMLMediaElement): boolean {
+    return this.routes.has(el);
+  }
+
+  /** Seconds between an element's current time and the moment that sound is heard. */
+  latency(el: HTMLMediaElement): number {
+    if (!this.ctx || !this.routes.has(el)) return 0;
+    return (this.ctx.baseLatency || 0) + (this.ctx.outputLatency || 0);
   }
 
   dispose(): void {
@@ -93,7 +115,7 @@ export class PreviewAudio {
   private apply(el: HTMLMediaElement, r: Route, mix: AudioMix): void {
     const ch = mix[r.kind];
     el.volume = 1;
-    r.gain.gain.value = channelGain(ch, ch.normalize.measuredLufs);
+    r.gain.gain.setTargetAtTime(channelGain(ch, this.loudness(r.kind)), this.ctx!.currentTime, GAIN_SMOOTHING_S);
     const settings = settingsOf(ch);
     if (isPlain(settings)) {
       if (r.chain) this.rewire(r, null);
@@ -126,6 +148,7 @@ export class PreviewAudio {
       (err: unknown) => {
         this.worklet = 'failed';
         console.warn('Voice enhancement preview unavailable', err);
+        this.onStatus();
       },
     );
   }

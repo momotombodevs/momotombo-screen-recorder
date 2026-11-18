@@ -6,7 +6,7 @@ import {
   type SourceKind,
 } from "@momotombo/project-model";
 import { TICKS_PER_SECOND } from "@momotombo/timing";
-import { integratedLoudness } from "../audio/loudness";
+import { LoudnessMeter } from "../audio/loudness";
 import { VoiceChain, channelGain, softLimit } from "../audio/voice-chain";
 import { t } from "../i18n";
 
@@ -58,8 +58,18 @@ export async function decodeTimelineAudio(
   mediaBase: string,
   kinds: readonly AudioKind[],
   signal?: AbortSignal,
+  cache?: Map<string, Promise<DecodedAudio>>,
 ): Promise<DecodedSources | null> {
   const ctx = new OfflineAudioContext(2, 1, SAMPLE_RATE);
+  const decode = (file: string): Promise<DecodedAudio> => {
+    const u = url(file);
+    const hit = cache?.get(u);
+    if (hit) return hit;
+    const p = decodeSource(file, u, ctx);
+    cache?.set(u, p);
+    p.catch(() => cache?.delete(u));
+    return p;
+  };
   const decoded: DecodedSources = new Map();
   const url = (file: string) =>
     mediaBase + file.split("/").map(encodeURIComponent).join("/");
@@ -69,7 +79,7 @@ export async function decodeTimelineAudio(
     for (const k of kinds) {
       const src = rec.sources[k];
       if (src)
-        decoded.set(sourceKey(rec.id, k), await decodeSource(src.file, url(src.file), ctx));
+        decoded.set(sourceKey(rec.id, k), await decode(src.file));
       if (signal?.aborted) return null;
     }
   }
@@ -82,64 +92,110 @@ const timelineLength = (project: Project) =>
 const continues = (a: SegmentPlacement | undefined, b: SegmentPlacement | undefined) =>
   !!a && !!b && a.segment.recordingId === b.segment.recordingId && a.segment.sourceEnd === b.segment.sourceStart;
 
-export function renderTrack(
-  project: Project,
-  kind: AudioKind,
-  decoded: DecodedSources,
-  length = timelineLength(project),
-): [Float32Array, Float32Array] | null {
-  const L = new Float32Array(length);
-  const R = new Float32Array(length);
+interface Piece {
+  outStart: number;
+  count: number;
+  inStart: number;
+  ratio: number;
+  c0: Float32Array;
+  c1: Float32Array;
+  fade: number;
+  fadeIn: boolean;
+  fadeOut: boolean;
+}
+
+interface TrackPlan {
+  pieces: Piece[];
+  stereo: boolean;
+}
+
+function planTrack(project: Project, kind: AudioKind, decoded: DecodedSources): TrackPlan | null {
   const placements = layoutSegments(project);
-  let any = false;
+  const pieces: Piece[] = [];
+  let stereo = false;
   placements.forEach((pl, n) => {
     const rec = project.recordings[pl.segment.recordingId];
     const buf = decoded.get(sourceKey(pl.segment.recordingId, kind));
     const src = rec?.sources[kind];
     if (!rec || !buf || !src) return;
-    any = true;
     const offset = src.startOffset + (rec.syncOffsets[kind] ?? 0);
-    const outStart = Math.round((pl.timelineStart / TICKS_PER_SECOND) * SAMPLE_RATE);
     const count = Math.round(((pl.timelineEnd - pl.timelineStart) / TICKS_PER_SECOND) * SAMPLE_RATE);
-    const inStart = ((pl.segment.sourceStart - offset) / TICKS_PER_SECOND) * buf.sampleRate;
-    const c0 = buf.getChannelData(0);
-    const c1 = buf.numberOfChannels > 1 ? buf.getChannelData(1) : c0;
-    const ratio = buf.sampleRate / SAMPLE_RATE;
     const fade = Math.min(Math.round(FADE_SECONDS * SAMPLE_RATE), Math.floor(count / 2));
-    const fadeIn = fade > 0 && !continues(placements[n - 1], pl);
-    const fadeOut = fade > 0 && !continues(pl, placements[n + 1]);
-    const last = c0.length - 1;
-    for (let i = 0; i < count; i++) {
-      const o = outStart + i;
-      if (o >= length) break;
-      const pos = Math.round(inStart) + i * ratio;
+    const c0 = buf.getChannelData(0);
+    stereo ||= buf.numberOfChannels > 1;
+    pieces.push({
+      outStart: Math.round((pl.timelineStart / TICKS_PER_SECOND) * SAMPLE_RATE),
+      count,
+      inStart: Math.round(((pl.segment.sourceStart - offset) / TICKS_PER_SECOND) * buf.sampleRate),
+      ratio: buf.sampleRate / SAMPLE_RATE,
+      c0,
+      c1: buf.numberOfChannels > 1 ? buf.getChannelData(1) : c0,
+      fade,
+      fadeIn: fade > 0 && !continues(placements[n - 1], pl),
+      fadeOut: fade > 0 && !continues(pl, placements[n + 1]),
+    });
+  });
+  return pieces.length > 0 ? { pieces, stereo } : null;
+}
+
+function renderBlock(plan: TrackPlan, from: number, L: Float32Array, R: Float32Array): void {
+  L.fill(0);
+  if (R !== L) R.fill(0);
+  const to = from + L.length;
+  for (const p of plan.pieces) {
+    const start = Math.max(from, p.outStart);
+    const end = Math.min(to, p.outStart + p.count);
+    const last = p.c0.length - 1;
+    for (let o = start; o < end; o++) {
+      const i = o - p.outStart;
+      const pos = p.inStart + i * p.ratio;
       const j = Math.floor(pos);
       if (j < 0 || j > last) continue;
       const f = pos - j;
       const k = Math.min(j + 1, last);
       let w = 1;
-      if (fadeIn && i < fade) w = (i + 1) / (fade + 1);
-      if (fadeOut && i >= count - fade) w = Math.min(w, (count - i) / (fade + 1));
-      L[o]! += (c0[j]! + (c0[k]! - c0[j]!) * f) * w;
-      R[o]! += (c1[j]! + (c1[k]! - c1[j]!) * f) * w;
+      if (p.fadeIn && i < p.fade) w = (i + 1) / (p.fade + 1);
+      if (p.fadeOut && i >= p.count - p.fade) w = Math.min(w, (p.count - i) / (p.fade + 1));
+      L[o - from]! += (p.c0[j]! + (p.c0[k]! - p.c0[j]!) * f) * w;
+      if (R !== L) R[o - from]! += (p.c1[j]! + (p.c1[k]! - p.c1[j]!) * f) * w;
     }
-  });
-  return any ? [L, R] : null;
+  }
 }
 
-export function processedTrack(
-  project: Project,
-  kind: AudioKind,
-  decoded: DecodedSources,
-  length = timelineLength(project),
-): [Float32Array, Float32Array] | null {
-  const track = renderTrack(project, kind, decoded, length);
-  if (track) new VoiceChain(project.audio[kind], SAMPLE_RATE).process(track);
-  return track;
+const BLOCK = SAMPLE_RATE;
+
+/** The kind's track after its voice chain, one block at a time; a mono track has R === L. */
+function* processedBlocks(project: Project, kind: AudioKind, plan: TrackPlan, length: number) {
+  const chain = new VoiceChain(project.audio[kind], SAMPLE_RATE);
+  const L = new Float32Array(BLOCK);
+  const R = plan.stereo ? new Float32Array(BLOCK) : L;
+  for (let from = 0; from < length; from += BLOCK) {
+    const n = Math.min(BLOCK, length - from);
+    const l = n === BLOCK ? L : L.subarray(0, n);
+    const r = R === L ? l : n === BLOCK ? R : R.subarray(0, n);
+    renderBlock(plan, from, l, r);
+    chain.process([l, r]);
+    yield { from, L: l, R: r };
+  }
 }
 
-export function trackLoudness(track: [Float32Array, Float32Array] | null): number | null {
-  return track ? integratedLoudness(track, SAMPLE_RATE) : null;
+/** Loudness of the processed track, yielding after every block so a caller can give the thread back. */
+export function* measureSteps(project: Project, kind: AudioKind, decoded: DecodedSources): Generator<void, number | null> {
+  const plan = planTrack(project, kind, decoded);
+  if (!plan) return null;
+  const meter = new LoudnessMeter(SAMPLE_RATE);
+  for (const b of processedBlocks(project, kind, plan, timelineLength(project))) {
+    meter.push([b.L, b.R]);
+    yield;
+  }
+  return meter.result();
+}
+
+function runToEnd<T>(steps: Generator<void, T>): T {
+  for (;;) {
+    const r = steps.next();
+    if (r.done) return r.value;
+  }
 }
 
 export function mixDecoded(
@@ -153,15 +209,16 @@ export function mixDecoded(
   let any = false;
   for (const k of AUDIO_KINDS) {
     if (!audible(project, k)) continue;
-    const ch = project.audio[k];
-    const track = processedTrack(project, k, decoded, length);
-    if (!track) continue;
+    const plan = planTrack(project, k, decoded);
+    if (!plan) continue;
     any = true;
-    const gain = channelGain(ch, ch.normalize.enabled ? trackLoudness(track) : null);
-    const [tl, tr] = track;
-    for (let i = 0; i < length; i++) {
-      L[i]! += tl[i]! * gain;
-      R[i]! += tr[i]! * gain;
+    const ch = project.audio[k];
+    const gain = channelGain(ch, ch.normalize.enabled ? runToEnd(measureSteps(project, k, decoded)) : null);
+    for (const b of processedBlocks(project, k, plan, length)) {
+      for (let i = 0; i < b.L.length; i++) {
+        L[b.from + i]! += b.L[i]! * gain;
+        R[b.from + i]! += b.R[i]! * gain;
+      }
     }
   }
   if (!any) return null;

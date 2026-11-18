@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { addRecording, createProject, parseProject, removeTimelineRange, serializeProject, setAudio, splitAt, type Project, type Recording } from '@momotombo/project-model';
 import { secondsToTicks as sec } from '@momotombo/timing';
 import { integratedLoudness } from '../audio/loudness';
-import { AudioReadError, mixTimelineAudio } from './audio-mix';
+import { AudioReadError, decodeTimelineAudio, mixTimelineAudio } from './audio-mix';
 
 const RATE = 48_000;
 
@@ -118,6 +118,22 @@ describe('mixTimelineAudio', () => {
     expect(L[1002]! - L[1001]!).toBeCloseTo(L[1001]! - L[1000]!, 7);
   });
 
+  it('bends a sum between 0.9 and full scale slightly, where the old mix passed it through', async () => {
+    fakeAudio({ 'r1/mic.webm': level(0.95) });
+    const [L] = (await mixTimelineAudio(projectWith(audioRecording('r1', { mic: 'r1/mic.webm' })), BASE))!;
+    expect(L[1000]).toBeLessThan(0.95);
+    expect(L[1000]).toBeGreaterThan(0.945);
+  });
+
+  it('decodes each source once when given a cache', async () => {
+    fakeAudio({ 'r1/mic.webm': level(0.25) });
+    const p = projectWith(audioRecording('r1', { mic: 'r1/mic.webm' }));
+    const cache = new Map();
+    await decodeTimelineAudio(p, BASE, ['mic'], undefined, cache);
+    await decodeTimelineAudio(p, BASE, ['mic'], undefined, cache);
+    expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1);
+  });
+
   it('applies a gain above 100%', async () => {
     fakeAudio({ 'r1/mic.webm': level(0.25) });
     const p = setAudio(projectWith(audioRecording('r1', { mic: 'r1/mic.webm' })), { mic: { gain: 2.5 } });
@@ -133,7 +149,7 @@ describe('mixTimelineAudio', () => {
     expect(pcm[0].reduce((m, v) => Math.max(m, Math.abs(v)), 0)).toBeLessThanOrEqual(1);
   });
 
-  it('exports a project saved before enhancement existed exactly as before, apart from the edge fades', async () => {
+  it('exports a project saved before enhancement existed exactly as before below the limiter knee, apart from the edge fades', async () => {
     fakeAudio({ 'r1/mic.webm': { sample: (i) => 0.3 * Math.sin(i / 7) }, 'r1/sys.webm': { sample: (i) => 0.2 * Math.cos(i / 5) } });
     const json = JSON.parse(serializeProject(projectWith(audioRecording('r1', { mic: 'r1/mic.webm', system: 'r1/sys.webm' }))));
     json.audio = { mic: { gain: 0.9, muted: false }, system: { gain: 0.7, muted: false } };

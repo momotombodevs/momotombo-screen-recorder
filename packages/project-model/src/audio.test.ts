@@ -14,7 +14,7 @@ describe('audio mix', () => {
     expect(a.mic.highpassHz).toBe(0);
     expect(a.mic.compressor.enabled).toBe(false);
     expect(a.mic.gate.enabled).toBe(false);
-    expect(a.mic.normalize).toEqual({ enabled: false, targetLufs: -16, measuredLufs: null });
+    expect(a.mic.normalize).toEqual({ enabled: false, targetLufs: -16 });
   });
 
   it('keeps a partial enhancement block and fills the rest', () => {
@@ -51,7 +51,7 @@ describe('audio mix', () => {
       ['audio.mic.compressor.thresholdDb', (a) => { a.mic.compressor.thresholdDb = 3; }],
       ['audio.mic.gate.thresholdDb', (a) => { a.mic.gate.thresholdDb = 'x'; }],
       ['audio.mic.normalize.targetLufs', (a) => { a.mic.normalize.targetLufs = 0; }],
-      ['audio.system.normalize.measuredLufs', (a) => { a.system.normalize.measuredLufs = 'loud'; }],
+      ['audio.system.normalize.enabled', (a) => { a.system.normalize.enabled = 'yes'; }],
       ['audio.mic.gate.enabled', (a) => { a.mic.gate.enabled = 1; }],
     ];
     for (const [field, mutate] of bad) {
@@ -59,12 +59,5 @@ describe('audio mix', () => {
       mutate(j.audio);
       expect(() => parseProject(j), field).toThrow(field);
     }
-  });
-
-  it('round-trips a measured loudness and clears it with null', () => {
-    let p = setAudio(createProject('a'), { mic: { normalize: { enabled: true, measuredLufs: -27.4 } } });
-    expect(parseProject(JSON.parse(serializeProject(p))).audio.mic.normalize.measuredLufs).toBe(-27.4);
-    p = setAudio(p, { mic: { normalize: { measuredLufs: null } } });
-    expect(parseProject(JSON.parse(serializeProject(p))).audio.mic.normalize.measuredLufs).toBeNull();
   });
 });

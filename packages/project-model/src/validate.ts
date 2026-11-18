@@ -480,18 +480,7 @@ const channel: Check = (v, p) =>
       compressor: (x, q) =>
         fields({ enabled: bool, thresholdDb: range(-60, 0), ratio: range(1, 20) }, x, q),
       gate: (x, q) => fields({ enabled: bool, thresholdDb: range(-100, 0) }, x, q),
-      normalize: (x, q) =>
-        fields(
-          {
-            enabled: bool,
-            targetLufs: range(-40, -5),
-            measuredLufs: (y, r) => {
-              if (y !== null) num(y, r, { min: -120, max: 20 });
-            },
-          },
-          x,
-          q,
-        ),
+      normalize: (x, q) => fields({ enabled: bool, targetLufs: range(-40, -5) }, x, q),
     },
     v,
     p,

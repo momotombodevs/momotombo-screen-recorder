@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { deepMerge, defaultAudio, type AudioChannel, type DeepPartial } from '@momotombo/project-model';
-import { VoiceChain, isPlain, normalizeGain, softLimit, VOICE_PRESET } from './voice-chain';
+import { VoiceChain, isPlain, normalizeGainDb, softLimit, VOICE_PRESET } from './voice-chain';
 
 const RATE = 48_000;
 const sine = (hz: number, seconds: number, amp = 1) =>
@@ -14,8 +14,14 @@ const run = (ch: AudioChannel, ...signals: Float32Array[]) => {
 };
 
 describe('softLimit', () => {
-  it('leaves normal levels untouched', () => {
-    for (const v of [0, 0.1, -0.5, 0.85, -0.89]) expect(softLimit(v)).toBe(v);
+  it('leaves levels up to the 0.9 knee untouched', () => {
+    for (const v of [0, 0.1, -0.5, 0.85, -0.9]) expect(softLimit(v)).toBe(v);
+  });
+
+  it('bends levels between the knee and full scale slightly (a change from the old pass-through)', () => {
+    expect(softLimit(0.95)).toBeGreaterThan(0.945);
+    expect(softLimit(0.95)).toBeLessThan(0.95);
+    expect(softLimit(1)).toBeCloseTo(0.976, 3);
   });
 
   it('is continuous and monotonic across the knee and never reaches past full scale', () => {
@@ -62,6 +68,24 @@ describe('VoiceChain', () => {
     expect(peak(run(ch, sine(1000, 1, 0.5))[0]!, RATE / 2)).toBeCloseTo(0.5, 2);
   });
 
+  it('processes a mono source shared by both sides once', () => {
+    const ch = channel(VOICE_PRESET);
+    const shared = sine(300, 0.5, 0.8);
+    new VoiceChain(ch, RATE).process([shared, shared]);
+    expect(shared).toEqual(run(ch, sine(300, 0.5, 0.8))[0]);
+  });
+
+  it('starts the high-pass fresh when it is turned back on', () => {
+    const chain = new VoiceChain(channel({ highpassHz: 100 }), RATE);
+    chain.process([sine(50, 0.2, 1)]);
+    chain.configure(channel({}));
+    chain.process([sine(50, 0.2, 1)]);
+    chain.configure(channel({ highpassHz: 100 }));
+    const silence = new Float32Array(256);
+    chain.process([silence]);
+    expect(peak(silence)).toBe(0);
+  });
+
   it('processes stereo with one linked gain', () => {
     const ch = channel({ compressor: { enabled: true, thresholdDb: -20, ratio: 4 } });
     const [l, r] = run(ch, sine(1000, 1, 1), sine(1000, 1, 0.1));
@@ -79,17 +103,21 @@ describe('VoiceChain', () => {
   });
 });
 
-describe('normalizeGain', () => {
+describe('normalizeGainDb', () => {
   it('reaches the target from the measured loudness', () => {
-    expect(normalizeGain({ enabled: true, targetLufs: -16, measuredLufs: -26 })).toBeCloseTo(10 ** 0.5);
+    expect(normalizeGainDb({ enabled: true, targetLufs: -16 }, -26)).toBeCloseTo(10);
   });
 
-  it('is 1 when off or not measured', () => {
-    expect(normalizeGain({ enabled: false, targetLufs: -16, measuredLufs: -26 })).toBe(1);
-    expect(normalizeGain({ enabled: true, targetLufs: -16, measuredLufs: null })).toBe(1);
+  it('is 0 dB when off or not measured', () => {
+    expect(normalizeGainDb({ enabled: false, targetLufs: -16 }, -26)).toBe(0);
+    expect(normalizeGainDb({ enabled: true, targetLufs: -16 }, null)).toBe(0);
   });
 
-  it('never boosts near-silence by more than 30 dB', () => {
-    expect(normalizeGain({ enabled: true, targetLufs: -16, measuredLufs: -90 })).toBeCloseTo(10 ** 1.5);
+  it('never boosts by more than 20 dB, so a near-silent track does not turn into hiss', () => {
+    expect(normalizeGainDb({ enabled: true, targetLufs: -16 }, -90)).toBe(20);
+  });
+
+  it('turns a loud track down without limit', () => {
+    expect(normalizeGainDb({ enabled: true, targetLufs: -16 }, 0)).toBe(-16);
   });
 });

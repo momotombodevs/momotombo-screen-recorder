@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import {
   BACKGROUND_PRESETS, DEFAULT_CAMERA_MOVE, DEFAULT_CAMERA_SPLIT, MAGNIFIER_LIMITS, activeVariant, addCameraMoveAt, setCameraMovePosition, layoutSegments, presetTransition, removeCameraLayout,
   removeMagnifier, removePrivacy, removeSegment, removeZoom, resolvedBaseCamera, resolvedFrameStyle, setAudio, setStyle, setSyncOffset,
@@ -17,9 +17,8 @@ import { PLACE_GRID, placeName } from './camera-names';
 import { clearZoomSuggestions, noSuggestionMessage, runZoomSuggestions, type ZoomRun } from './zoom-actions';
 import { t } from '../../i18n';
 import { probe } from '../../perf-probe';
-import { loudnessInputs, measureChannelLoudness } from '../../audio/measure';
-import { VOICE_PRESET } from '../../audio/voice-chain';
-import { AUDIO_KINDS, type AudioKind } from '../../export/audio-mix';
+import type { Loudness } from '../../audio/measure';
+import { VOICE_PRESET, normalizeGainDb } from '../../audio/voice-chain';
 
 const pct = (v: number) => `${Math.round(v * 100)}%`;
 const secs = (v: number) => t("{n} s", { n: v.toFixed(2) });
@@ -455,36 +454,17 @@ const hasVoiceEnhance = (c: AudioChannel) => c.highpassHz > 0 || c.compressor.en
 const VOICE_OFF = { highpassHz: 0, compressor: { enabled: false }, gate: { enabled: false }, normalize: { enabled: false } } satisfies DeepPartial<AudioChannel>;
 const db = (v: number) => t("{n} dB", { n: Math.round(v) });
 
-function useMeasuredLoudness(store: EditorStore): void {
-  const project = useEditor(store, (s) => s.project);
-  const done = useRef(new Map<AudioKind, string>());
-  const wanted = AUDIO_KINDS.map((k) => (project.audio[k].normalize.enabled ? loudnessInputs(project, k) : ''));
-  useEffect(() => {
-    const jobs = AUDIO_KINDS.filter((k, i) => wanted[i] && done.current.get(k) !== wanted[i]);
-    if (jobs.length === 0) return;
-    const ctl = new AbortController();
-    const timer = setTimeout(async () => {
-      for (const k of jobs) {
-        const p = store.project;
-        const key = loudnessInputs(p, k);
-        try {
-          const lufs = await measureChannelLoudness(p, k, store.getState().mediaBase, ctl.signal);
-          if (ctl.signal.aborted) return;
-          done.current.set(k, key);
-          if (store.project.audio[k].normalize.measuredLufs !== lufs)
-            store.apply((q) => setAudio(q, { [k]: { normalize: { measuredLufs: lufs } } }), { coalesce: `loudness-${k}` });
-        } catch (err) {
-          if (ctl.signal.aborted) return;
-          done.current.set(k, key);
-          console.warn('Loudness measurement failed', err);
-        }
-      }
-    }, 500);
-    return () => { ctl.abort(); clearTimeout(timer); };
-  }, [store, wanted.join('|')]);
+function loudnessNote(l: Loudness, n: AudioChannel['normalize']): string {
+  if (l.state === 'off') return t("Activa «Normalizar el volumen» para medirlo.");
+  if (l.state === 'measuring') return t("Midiendo el volumen…");
+  if (l.state === 'failed') return t("No se pudo medir el volumen.");
+  if (l.lufs === null) return t("No hay voz que medir.");
+  const gain = normalizeGainDb(n, l.lufs);
+  return t("Volumen medido: {n} LUFS · ganancia aplicada {g} dB", { n: l.lufs.toFixed(1), g: `${gain >= 0 ? '+' : '−'}${Math.abs(gain).toFixed(1)}` });
 }
 
-function VoiceEnhance({ store, mic }: { store: EditorStore; mic: AudioChannel }) {
+function VoiceEnhance({ store, player, mic }: { store: EditorStore; player: Player; mic: AudioChannel }) {
+  const info = useSyncExternalStore(player.onAudioInfo, player.audioInfo);
   const set = (patch: DeepPartial<AudioChannel>, coalesce?: string) =>
     store.apply((p) => setAudio(p, { mic: patch }), coalesce ? { coalesce } : {});
   const n = mic.normalize;
@@ -503,14 +483,15 @@ function VoiceEnhance({ store, mic }: { store: EditorStore; mic: AudioChannel })
       {mic.gate.enabled && <Slider label={t("Umbral de la puerta")} value={mic.gate.thresholdDb} min={-80} max={-20} step={1} onChange={(thresholdDb) => set({ gate: { thresholdDb } }, 'mic-gate')} format={db} />}
       <Toggle label={t("Normalizar el volumen")} checked={n.enabled} onChange={(enabled) => set({ normalize: { enabled } })} />
       {n.enabled && <Slider label={t("Volumen objetivo")} value={n.targetLufs} min={-30} max={-10} step={1} onChange={(targetLufs) => set({ normalize: { targetLufs } }, 'mic-lufs')} format={(v) => t("{n} LUFS", { n: v })} />}
-      <p className="muted small" aria-live="polite">
-        {n.measuredLufs !== null ? t("Volumen medido: {n} LUFS", { n: n.measuredLufs.toFixed(1) }) : n.enabled ? t("Midiendo el volumen…") : t("Activa «Normalizar el volumen» para medirlo.")}
-      </p>
+      <p className="muted small" aria-live="polite">{loudnessNote(info.mic, n)}</p>
+      {info.enhancementUnavailable && hasVoiceEnhance(mic) && (
+        <p className="note"><Icon name="info" size={14} />{t("La vista previa suena sin la mejora de voz; la exportación sí la aplica.")}</p>
+      )}
     </Section>
   );
 }
 
-function AudioTab({ store }: { store: EditorStore }) {
+function AudioTab({ store, player }: { store: EditorStore; player: Player }) {
   const project = useEditor(store, (s) => s.project);
   const a = project.audio;
   const recs = Object.values(project.recordings);
@@ -523,7 +504,7 @@ function AudioTab({ store }: { store: EditorStore }) {
         <Slider label={t("Audio del sistema")} value={a.system.gain} {...GAIN} onChange={(gain) => store.apply((p) => setAudio(p, { system: { gain } }), { coalesce: 'sys' })} format={pct} />
         <Toggle label={t("Silenciar el audio del sistema")} checked={a.system.muted} onChange={(muted) => store.apply((p) => setAudio(p, { system: { muted } }))} />
       </Section>
-      {hasMic && <VoiceEnhance store={store} mic={a.mic} />}
+      {hasMic && <VoiceEnhance store={store} player={player} mic={a.mic} />}
       {recs.map((r, i) => (
         <Section key={r.id} title={t("Sincronía · Grabación {n}", { n: i + 1 })} defaultOpen={false}>
           <p className="muted small">{t("Desplaza una fuente si llega tarde. Un valor positivo retrasa la fuente.")}</p>
@@ -577,7 +558,6 @@ function ZoomTab({ store }: { store: EditorStore }) {
 export function Inspector({ store, player }: { store: EditorStore; player: Player }) {
   probe.count('react:Inspector');
   const tab = useEditor(store, (s) => s.tab);
-  useMeasuredLoudness(store);
   return (
     <aside className="inspector">
       <SelectedPanel store={store} player={player} />
@@ -602,7 +582,7 @@ export function Inspector({ store, player }: { store: EditorStore; player: Playe
         {tab === 'camera' && <CameraTab store={store} />}
         {tab === 'cursor' && <CursorTab store={store} />}
         {tab === 'magnifier' && <MagnifierTab store={store} />}
-        {tab === 'audio' && <AudioTab store={store} />}
+        {tab === 'audio' && <AudioTab store={store} player={player} />}
         {tab === 'zoom' && <ZoomTab store={store} />}
       </div>
     </aside>

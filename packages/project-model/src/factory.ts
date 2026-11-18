@@ -59,7 +59,7 @@ function plainChannel(gain: number): AudioChannel {
     highpassHz: 0,
     compressor: { enabled: false, thresholdDb: -24, ratio: 3 },
     gate: { enabled: false, thresholdDb: -50 },
-    normalize: { enabled: false, targetLufs: -16, measuredLufs: null },
+    normalize: { enabled: false, targetLufs: -16 },
   };
 }
 

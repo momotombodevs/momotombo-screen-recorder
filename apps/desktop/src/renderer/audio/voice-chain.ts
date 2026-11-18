@@ -21,15 +21,15 @@ export function softLimit(v: number): number {
   return v < 0 ? -out : out;
 }
 
-const MAX_NORMALIZE_DB = 30;
+export const MAX_NORMALIZE_DB = 20;
 
-export function normalizeGain(n: AudioChannel['normalize']): number {
-  if (!n.enabled || n.measuredLufs === null) return 1;
-  return 10 ** (Math.min(MAX_NORMALIZE_DB, n.targetLufs - n.measuredLufs) / 20);
+export function normalizeGainDb(n: AudioChannel['normalize'], measuredLufs: number | null): number {
+  if (!n.enabled || measuredLufs === null) return 0;
+  return Math.min(MAX_NORMALIZE_DB, n.targetLufs - measuredLufs);
 }
 
 export function channelGain(ch: AudioChannel, measuredLufs: number | null): number {
-  return ch.gain * normalizeGain({ ...ch.normalize, measuredLufs });
+  return ch.gain * 10 ** (normalizeGainDb(ch.normalize, measuredLufs) / 20);
 }
 
 const toDb = (v: number) => 20 * Math.log10(Math.max(v, 1e-12));
@@ -71,6 +71,7 @@ export class VoiceChain {
   }
 
   configure(settings: ChainSettings): void {
+    if (!(this.s?.highpassHz > 0)) this.hpState = [];
     this.s = settings;
     if (settings.highpassHz <= 0) return;
     const w0 = (2 * Math.PI * Math.min(settings.highpassHz, this.rate * 0.45)) / this.rate;
@@ -80,8 +81,9 @@ export class VoiceChain {
     this.hp = [(1 + cos) / 2 / a0, -(1 + cos) / a0, (1 + cos) / 2 / a0, (-2 * cos) / a0, (1 - alpha) / a0];
   }
 
-  process(channels: Float32Array[]): void {
+  process(sides: Float32Array[]): void {
     const { highpassHz, gate, compressor } = this.s;
+    const channels = [...new Set(sides)];
     if (isPlain(this.s) || channels.length === 0) return;
     if (highpassHz > 0) channels.forEach((c, i) => this.highpass(c, i));
     if (!gate.enabled && !compressor.enabled) return;

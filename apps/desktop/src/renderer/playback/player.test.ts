@@ -46,6 +46,21 @@ function setup() {
   return { store, player: new Player(store), created };
 }
 
+function suspendedOutput() {
+  const output = { start: () => undefined as void };
+  class Node { connect(n: unknown) { return n; } disconnect() { return undefined; } }
+  vi.stubGlobal('AudioContext', class {
+    state = 'suspended'; currentTime = 0; baseLatency = 0; outputLatency = 0; destination = new Node();
+    createGain() { return Object.assign(new Node(), { gain: { value: 1, setTargetAtTime() { return undefined; } } }); }
+    createWaveShaper() { return Object.assign(new Node(), { curve: null }); }
+    createMediaElementSource() { return new Node(); }
+    resume() { return new Promise<void>((r) => { output.start = () => { this.state = 'running'; r(); }; }); }
+    close() { return Promise.resolve(); }
+  });
+  vi.stubGlobal('requestAnimationFrame', () => 0);
+  return output;
+}
+
 describe('Player', () => {
   afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
 
@@ -69,6 +84,30 @@ describe('Player', () => {
     store.undo();
     store.redo();
     expect(player.elementsFor('r2')?.screen?.src).toContain('r2/screen.webm');
+    player.dispose();
+  });
+
+  it('starts playback only once the sound output is running', async () => {
+    const output = suspendedOutput();
+    const { store, player } = setup();
+    player.play();
+    player.play();
+    expect(store.getState().playing).toBe(false);
+    output.start();
+    await Promise.resolve(); await Promise.resolve();
+    expect(store.getState().playing).toBe(true);
+    player.pause();
+    player.dispose();
+  });
+
+  it('does not start late when paused while the sound output was starting', async () => {
+    const output = suspendedOutput();
+    const { store, player } = setup();
+    player.play();
+    player.pause();
+    output.start();
+    await Promise.resolve(); await Promise.resolve();
+    expect(store.getState().playing).toBe(false);
     player.dispose();
   });
 });
