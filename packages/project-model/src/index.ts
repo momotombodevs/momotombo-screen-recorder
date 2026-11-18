@@ -10,3 +10,4 @@ export * from './evaluate';
 export * from './persist';
 export * from './constraints';
 export * from './camera-moves';
+export * from './text';

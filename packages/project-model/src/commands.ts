@@ -2,7 +2,7 @@ import { frameDuration, type Ticks } from '@momotombo/timing';
 import { newId } from './factory';
 import { layoutSegments, timelineToSource } from './mapping';
 import type {
-  AudioMix, CameraLayoutItem, ID, MagnifierItem, PrivacyItem, Project, SourceKind, Style, Variant, ZoomItem,
+  AudioMix, CameraLayoutItem, ID, MagnifierItem, PrivacyItem, Project, SourceKind, Style, TextItem, Variant, ZoomItem,
 } from './types';
 
 /**
@@ -86,7 +86,7 @@ export function removeTimelineRange(project: Project, start: Ticks, end: Ticks):
 
 // ─── Items ──────────────────────────────────────────────────────────────────
 
-type ItemKey = 'zooms' | 'cameraLayouts' | 'privacy' | 'magnifiers';
+type ItemKey = 'zooms' | 'cameraLayouts' | 'privacy' | 'magnifiers' | 'texts';
 type ItemOf<K extends ItemKey> = Project[K][number];
 
 function upsert<K extends ItemKey>(project: Project, key: K, item: ItemOf<K>): Project {
@@ -117,6 +117,7 @@ export type NewZoom = Omit<ZoomItem, 'id' | 'type'> & { id?: ID };
 export type NewCameraLayout = Omit<CameraLayoutItem, 'id' | 'type'> & { id?: ID };
 export type NewPrivacy = Omit<PrivacyItem, 'id' | 'type'> & { id?: ID };
 export type NewMagnifier = Omit<MagnifierItem, 'id' | 'type'> & { id?: ID };
+export type NewText = Omit<TextItem, 'id' | 'type'> & { id?: ID };
 
 export function addZoom(project: Project, z: NewZoom): { project: Project; id: ID } {
   const id = z.id ?? newId('zm');
@@ -145,6 +146,13 @@ export function addMagnifier(project: Project, item: NewMagnifier): { project: P
 }
 export const updateMagnifier = (p: Project, id: ID, patch: DeepPartial<MagnifierItem>) => patchItem(p, 'magnifiers', id, patch, true);
 export const removeMagnifier = (p: Project, id: ID) => removeItem(p, 'magnifiers', id);
+
+export function addText(project: Project, item: NewText): { project: Project; id: ID } {
+  const id = item.id ?? newId('txt');
+  return { project: upsert(project, 'texts', { ...item, id, type: 'text' }), id };
+}
+export const updateText = (p: Project, id: ID, patch: DeepPartial<TextItem>) => patchItem(p, 'texts', id, patch, true);
+export const removeText = (p: Project, id: ID) => removeItem(p, 'texts', id);
 
 /**
  * Replaces the automatic zoom suggestions of a recording. Items the user edited

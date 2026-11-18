@@ -65,6 +65,8 @@
   --track-privacy-rgb: 229, 25, 58;
   --track-magnifier: #c58cff;
   --track-magnifier-rgb: 197, 140, 255;
+  --track-text: #ff8a3d;
+  --track-text-rgb: 255, 138, 61;
   --track-overlay: #f2f2f2;
 
   --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;

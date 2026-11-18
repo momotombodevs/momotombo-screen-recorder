@@ -1,6 +1,7 @@
-import type { PrivacyLayer, Rect, RenderPlan } from '@momotombo/project-model';
+import type { ID, PrivacyLayer, Rect, RenderPlan, TextLayer } from '@momotombo/project-model';
 import { magnifierSampling, sourceToCanvas } from '@momotombo/project-model';
 import { createCursorSprite, type CursorSprite } from './cursor-sprite';
+import { anchoredBox, rasterKey, rasterizeText, type TextRaster } from './text-raster';
 import { GLError, Program, RenderTarget, createTexture, hexToRgba, premul, type GL } from './gl';
 import { BACKGROUND_FS, BLUR_FS, LAYER_FS, MAGNIFIER_FS, PRIVACY_FS, QUAD_VS, SHADOW_FS, SHAPE_FS } from './shaders';
 
@@ -46,6 +47,8 @@ export class Compositor {
   private blurB: RenderTarget;
   private cursor: CursorSprite;
   private cursorTex: WebGLTexture;
+  private textCache = new Map<string, { raster: TextRaster; tex: WebGLTexture }>();
+  private drawnTextBoxes = new Map<ID, Rect>();
   readonly stats: CompositorStats;
 
   constructor(readonly canvas: HTMLCanvasElement | OffscreenCanvas, opts: { preserveDrawingBuffer?: boolean } = {}) {
@@ -257,7 +260,57 @@ export class Compositor {
         .set('uExp', cam.cornerExponent).set('uBorder', cam.border.width).set('uBorderColor', [br, bg, bb, ba]).set('uOpacity', cam.opacity);
       this.draw(this.layer, cam.rect, t);
     }
+    this.drawTexts(plan.texts, t);
     this.stats.lastRenderMs = performance.now() - t0;
+  }
+
+  /** Where each text of the last frame sits at rest (no animation offset or scale), in canvas pixels. */
+  get textBoxes(): ReadonlyMap<ID, Rect> {
+    return this.drawnTextBoxes;
+  }
+
+  private textTexture(layer: TextLayer, used: Set<string>) {
+    const key = rasterKey(layer);
+    used.add(key);
+    let entry = this.textCache.get(key);
+    if (!entry) {
+      const raster = rasterizeText(layer, this.stats.maxTextureSize);
+      const tex = createTexture(this.gl);
+      this.upload(tex, raster.image);
+      entry = { raster, tex };
+      this.textCache.set(key, entry);
+    }
+    return entry;
+  }
+
+  private drawTexts(layers: TextLayer[], t: { size: readonly [number, number]; flip: number }) {
+    const gl = this.gl;
+    const used = new Set<string>();
+    this.drawnTextBoxes = new Map();
+    gl.activeTexture(gl.TEXTURE0);
+    for (const layer of layers) {
+      const { raster, tex } = this.textTexture(layer, used);
+      const k = 1 / raster.pixelScale;
+      const box = anchoredBox(layer.anchor, layer.position, raster.boxInImage.w * k, raster.boxInImage.h * k);
+      this.drawnTextBoxes.set(layer.id, box);
+      const cx = box.x + box.w / 2 + layer.offset.x;
+      const cy = box.y + box.h / 2 + layer.offset.y;
+      const s = layer.scale * k;
+      let x = cx - (raster.boxInImage.x + raster.boxInImage.w / 2) * s;
+      let y = cy - (raster.boxInImage.y + raster.boxInImage.h / 2) * s;
+      if (s === 1) { x = Math.round(x); y = Math.round(y); }
+      const w = raster.image.width * s;
+      const h = raster.image.height * s;
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      this.layer.use().set('uTex', 0).set('uUV', [0, 0, 1, 1]).set('uSize', [w, h]).set('uRadius', 0).set('uExp', 2)
+        .set('uBorder', 0).set('uOpacity', layer.opacity);
+      this.draw(this.layer, { x, y, w, h }, t);
+    }
+    for (const [key, entry] of this.textCache) {
+      if (used.has(key)) continue;
+      gl.deleteTexture(entry.tex);
+      this.textCache.delete(key);
+    }
   }
 
   private drawBackground(plan: RenderPlan, src: FrameSources, t: { size: readonly [number, number]; flip: number }) {
@@ -361,6 +414,8 @@ export class Compositor {
     const gl = this.gl;
     for (const p of [this.layer, this.shadow, this.shape, this.bg, this.blur, this.privacy, this.magnifier]) p.dispose();
     for (const tex of [this.screenTex, this.cameraTex, this.bgTex, this.cursorTex]) gl.deleteTexture(tex);
+    for (const entry of this.textCache.values()) gl.deleteTexture(entry.tex);
+    this.textCache.clear();
     gl.deleteVertexArray(this.quad);
     gl.deleteBuffer(this.quadBuf);
     this.fx.dispose();

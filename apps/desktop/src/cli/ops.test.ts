@@ -480,3 +480,85 @@ describe('describeProject', () => {
     expect(d.recordings[0]!.capture).toMatchObject({ backend: 'web', hasClicks: true, target: { kind: 'display' } });
   });
 });
+
+describe('text ops', () => {
+  const texts = (ops: unknown, project?: Project) => edit(ops, project).texts;
+
+  it('adds a title by default and a preset when named, and reports where each landed', () => {
+    const { project, results, warnings } = run([
+      { op: 'addText', start: 1, end: 4, text: 'Momotombo' },
+      { op: 'addText', start: 2, end: 6, text: 'Ana López\nDiseñadora', preset: 'lower-third' },
+    ]);
+    expect(warnings).toEqual([]);
+    expect(results.map((r) => r.placed)).toEqual([{ start: 1, end: 4 }, { start: 2, end: 6 }]);
+    const [title, lower] = describeProject(project).texts;
+    expect(title).toMatchObject({ id: results[0]!.id, text: 'Momotombo', anchor: 'center', fontWeight: 800, enter: { kind: 'pop', duration: 0.5 }, shown: [{ start: 1, end: 4 }] });
+    expect(lower).toMatchObject({ anchor: 'bottom-left', background: { color: '#111318' }, enter: { kind: 'slide-right', duration: 0.45 } });
+    expect(() => validatedProjectText(project)).not.toThrow();
+  });
+
+  it('lets any field override the preset, and null drop a preset background', () => {
+    const [t] = texts([{
+      op: 'addText', start: 1, end: 3, text: 'Hola', preset: 'caption', position: { x: 0.2, y: 0.3 }, fontSize: 0.06, color: '#FF0000',
+      background: null, stroke: { color: '#000000', width: 0.08 }, enter: { kind: 'typewriter', duration: 1.2 }, exit: { kind: 'none', duration: 0 },
+    }]);
+    expect(t).toMatchObject({ position: { x: 0.2, y: 0.3 }, fontSize: 0.06, color: '#FF0000', stroke: { width: 0.08 }, enter: { kind: 'typewriter', duration: 1.2 }, exit: { kind: 'none' } });
+    expect(t).not.toHaveProperty('background');
+  });
+
+  it('places texts over each other in time without shortening them', () => {
+    const { results, warnings } = run([
+      { op: 'addText', start: 1, end: 6, text: 'Title' },
+      { op: 'addText', start: 2, end: 5, text: 'Caption', preset: 'caption' },
+    ]);
+    expect(results[1]!.placed).toEqual({ start: 2, end: 5 });
+    expect(warnings).toEqual([]);
+  });
+
+  it('warns when a text across a cut is shortened to the clip section it starts in', () => {
+    const { results, warnings } = run([{ op: 'cut', start: 10, end: 20 }, { op: 'addText', start: 8, end: 14, text: 'x' }]);
+    expect(results[1]!.placed).toEqual({ start: 8, end: 10 });
+    expect(warnings).toHaveLength(1);
+  });
+
+  it.each([
+    ['an unknown preset', { preset: 'banner' }, /preset/],
+    ['an unknown animation kind', { enter: { kind: 'spin', duration: 0.3 } }, /enter\.kind/],
+    ['a font size above the limit', { fontSize: 0.5 }, /fontSize/],
+    ['a weight that is not offered', { fontWeight: 650 }, /fontWeight/],
+    ['a colour that is not #rrggbb', { color: 'red' }, /color/],
+    ['empty text', { text: '   ' }, /text/],
+    ['a misspelled field', { colour: '#FFFFFF' }, /colour/],
+  ])('refuses %s', (_, extra, message) => {
+    expect(() => parseOps([{ op: 'addText', start: 1, end: 3, text: 'Hola', ...extra }])).toThrow(message);
+  });
+
+  it('updates fields, merges nested ones, converts animation seconds, drops and adds a background', () => {
+    const added = run([{ op: 'addText', start: 1, end: 4, text: 'Hola', preset: 'lower-third' }]);
+    const id = added.results[0]!.id!;
+    const [t] = texts([
+      { op: 'updateItem', track: 'texts', id, patch: { text: 'Adiós', position: { y: 0.5 }, background: { opacity: 0.4 }, exit: { duration: 1 } } },
+    ], added.project);
+    expect(t).toMatchObject({ text: 'Adiós', position: { x: 0.06, y: 0.5 }, background: { color: '#111318', opacity: 0.4 }, exit: { kind: 'fade', duration: 1 } });
+    const dropped = apply([{ op: 'updateItem', track: 'texts', id, patch: { background: null } }], added.project);
+    expect(dropped.texts[0]).not.toHaveProperty('background');
+    expect(() => apply([{ op: 'updateItem', track: 'texts', id, patch: { background: { opacity: 0.5 } } }], dropped)).toThrow(/give all of color, opacity, padding, radius/);
+    expect(apply([{ op: 'updateItem', track: 'texts', id, patch: { shadow: { color: '#000000', opacity: 0.5, blur: 0.2, offsetY: 0.05 } } }], dropped).texts[0]!.shadow).toBeDefined();
+  });
+
+  it('refuses a text patch with an out-of-range value, a misspelled field or a locked field', () => {
+    const added = run([{ op: 'addText', start: 1, end: 4, text: 'Hola' }]);
+    const id = added.results[0]!.id!;
+    expect(() => run([{ op: 'updateItem', track: 'texts', id, patch: { fontSize: 2 } }], added.project)).toThrow(/texts\.fontSize/);
+    expect(() => run([{ op: 'updateItem', track: 'texts', id, patch: { colour: '#000000' } }], added.project)).toThrow(/colour/);
+    expect(() => run([{ op: 'updateItem', track: 'texts', id, patch: { id: 'x' } }], added.project)).toThrow(/texts\.id/);
+  });
+
+  it('retimes and removes a text', () => {
+    const added = run([{ op: 'addText', start: 1, end: 4, text: 'Hola' }, { op: 'addText', start: 2, end: 3, text: 'Otro' }]);
+    const id = added.results[0]!.id!;
+    const moved = run([{ op: 'updateItem', track: 'texts', id, start: 2.5, end: 5 }], added.project);
+    expect(describeProject(moved.project).texts.find((t) => t.text === 'Hola')!.shown).toEqual([{ start: 2.5, end: 5 }]);
+    expect(edit([{ op: 'removeItem', track: 'texts', id: moved.results[0]!.id! }], moved.project).texts.map((t) => t.text)).toEqual(['Otro']);
+  });
+});
