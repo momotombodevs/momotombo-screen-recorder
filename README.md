@@ -68,6 +68,23 @@ _Screenshots come from a made-up sample project; no real screen, person or camer
 
 Also on the timeline: trim, split, add videos (MP4, MOV, WebM), markers during recording, pause and resume, camera moves over time, themes and backgrounds, undo and redo.
 
+## Edit with Claude (optional companion skill)
+
+Momotombo has a companion: [momotombo-video-edit](https://github.com/momotombodevs/momotombo-video-edit), a [Claude Code](https://claude.com/claude-code) skill. The two complement each other:
+
+- **Momotombo** records and is the editor where you see, adjust and export everything.
+- **The skill** lets you ask Claude, in plain words, to review the take and edit it. It checks the voice, noise, black or frozen video and dead time, tells you if it is better to record again (and how), then cuts, improves the voice, adds titles and captions, places the camera, exports an MP4 and checks the result.
+
+Everything Claude changes shows up in the Momotombo editor, and one undo reverts the whole batch. The skill is optional: the app works the same without it.
+
+It talks to Momotombo through the `momotombo-edit` command-line tool in this repository (`apps/desktop/src/cli/`):
+
+```
+momotombo-edit list | describe | apply | open | analyze | export
+```
+
+`analyze` needs `ffmpeg` and `ffprobe` on your `PATH`; the command-line tool works with or without Claude. The app itself still makes no network requests. Claude Code is a separate program: it sends what you and Claude write to Anthropic, and when Claude reviews an export it looks at still frames from it. Recordings and project files are never uploaded by Momotombo.
+
 ## What's in 0.1.0
 
 - **macOS** (Apple silicon and Intel), macOS 13 Ventura or later. Recording uses Momotombo's macOS recording helper: system audio goes to its own track and the pointer is kept out of the video. The Intel package passed all of the app's own tests under Rosetta 2 on an Apple silicon Mac; it has not been tried on Intel hardware yet.
